@@ -17,7 +17,7 @@ from pathlib import Path
 DEFAULT_CAMERAS_FILE = Path(__file__).resolve().parent.parent / "config" / "cameras.json"
 DEFAULT_OUT_DIR = Path("/etc/replay-system/cameras")
 DEFAULT_BUFFER_ROOT = "/var/replay"
-DEFAULT_SEGMENT_TIME = 5
+DEFAULT_SEGMENT_TIME = 3
 
 
 def main() -> None:

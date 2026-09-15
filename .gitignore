@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# rePET: dados/estado gerado por start.sh (buffer, clipes, logs, PIDs)
+/.data/
+/logs/
+/run/
+
+# rePET: config real (credenciais RTSP reais de câmeras) — repositório é
+# público, nunca commitar isto. Use config/cameras.example.json como
+# ponto de partida (copiar pra config/cameras.json e preencher de verdade).
+/config/cameras.json

@@ -23,8 +23,15 @@ CAMERAS_FILE = Path(
 )
 
 CLIP_DURATION_SECONDS = float(os.environ.get("CLIP_DURATION_SECONDS", "45"))
-SEGMENT_TIME = int(os.environ.get("SEGMENT_TIME", "5"))
+SEGMENT_TIME = int(os.environ.get("SEGMENT_TIME", "3"))
 SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN", "2.0"))
+
+# Se o segmento fechado mais recente do buffer for mais velho que isso
+# (câmera travada/desconectada, mas o capture_camera.sh ainda rodando),
+# o corte falha em vez de devolver um clipe com conteúdo velho/errado.
+MAX_STALENESS_SECONDS = float(
+    os.environ.get("MAX_STALENESS_SECONDS", str(3 * SEGMENT_TIME + SAFETY_MARGIN + 5))
+)
 
 
 def load_cameras() -> dict[str, dict]:

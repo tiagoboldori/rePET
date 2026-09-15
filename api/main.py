@@ -13,6 +13,7 @@ Rodar localmente (dev):
     uvicorn api.main:app --reload --port 8000
 """
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import config
@@ -53,6 +54,7 @@ def trigger_replay(quadra_id: str):
             duration_seconds=config.CLIP_DURATION_SECONDS,
             segment_time=config.SEGMENT_TIME,
             safety_margin=config.SAFETY_MARGIN,
+            max_staleness_seconds=config.MAX_STALENESS_SECONDS,
         )
     except ClipGenerationError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -62,6 +64,40 @@ def trigger_replay(quadra_id: str):
         "clip_filename": clip_path.name,
         "clip_url": f"/clips/{clip_path.name}",
     }
+
+
+@app.get("/quadra/{quadra_id}", response_class=HTMLResponse)
+def list_replays(quadra_id: str):
+    """Página pública (sem login) listando os replays já cortados dessa
+    quadra, mais recente primeiro. Lê direto do disco — não depende de
+    Postgres (ainda não existe)."""
+    cameras = config.load_cameras()
+    if quadra_id not in cameras:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"quadra_id '{quadra_id}' não está em {config.CAMERAS_FILE}. "
+                "Confira config/cameras.json."
+            ),
+        )
+
+    clips = sorted(
+        config.OUTPUT_DIR.glob(f"{quadra_id}_*.mp4"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    items = "".join(
+        f"<li><video controls preload='metadata' src='/clips/{p.name}'></video>"
+        f"<p>{p.name}</p></li>"
+        for p in clips
+    ) or "<li>Nenhum replay ainda.</li>"
+
+    nome = cameras[quadra_id]["nome"]
+    return HTMLResponse(
+        f"<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>Replays — {nome}</title></head>"
+        f"<body><h1>Replays — {nome}</h1><ul>{items}</ul></body></html>"
+    )
 
 
 @app.get("/health")

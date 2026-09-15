@@ -1,9 +1,16 @@
-# Replay System — backend central (fase de software, sem o botão ainda)
+# Replay System — backend central
 
-Sistema de replay de vídeo para quadras esportivas. Este repositório cobre
-a parte de **software do backend central** (100% centralizado — buffer,
-corte de clipe, e a API que aciona tudo isso). O **botão físico** (ESP32 +
-ESPHome + Home Assistant) ainda não foi implementado — é a próxima fase.
+Sistema de replay de vídeo para quadras esportivas. Cobre o **backend
+central** (100% centralizado — buffer, corte de clipe, API e página pública
+por quadra) e o **botão físico** (ESPHome), já validados de ponta a ponta
+com hardware e câmera reais em 2026-09-15.
+
+O botão fala **direto com esta API** via HTTP — não existe Home Assistant
+no meio dessa chamada (decisão revisada; ver "Cadeia do botão" abaixo). O
+firmware de bring-up usado no primeiro teste foi um devkit **ESP8266**
+("NodeMCU V3") só porque já estava disponível — o hardware definitivo
+planejado é um devkit **ESP32 + módulo Ethernet W5500**, ainda pendente de
+compra/novo bring-up.
 
 ## Visão geral: o que está rodando e quando
 
@@ -11,7 +18,7 @@ Existem duas coisas bem separadas, com ciclos de vida diferentes:
 
 1. **Captura contínua (nunca para, não depende de evento nenhum).**
    Um processo `ffmpeg` por câmera fica gravando 24/7, cortando o vídeo
-   bruto em segmentos de 5s dentro do **buffer**. Isso é o que permite
+   bruto em segmentos de 3s dentro do **buffer**. Isso é o que permite
    existir um "últimos 45 segundos" pra olhar pra trás a qualquer momento.
    Roda como um serviço systemd por câmera (`replay-capture@<quadra_id>`).
 
@@ -23,16 +30,14 @@ Existem duas coisas bem separadas, com ciclos de vida diferentes:
    instante exato em que a chamada chega** e grava um arquivo novo no
    disco persistente.
 
-Cadeia completa prevista pro botão (ainda não implementada aqui):
+Cadeia do botão (validada com hardware real em 2026-09-15):
 ```
-botão físico (ESP32) --webhook genérico--> Home Assistant (automação)
-                                                  |
-                                                  v
-                                    POST /replay/{quadra_id}  <- ESTE repositório
+botão físico (GPIO) --> ESP (ESPHome, http_request.post) --> POST /replay/{quadra_id}  <- ESTE repositório
 ```
-O Home Assistant é quem traduz o payload genérico do botão (`{"quadra": "..."}`)
-na chamada específica pra este endpoint — o backend nunca fala com o ESP
-diretamente.
+Sem Home Assistant no meio — o firmware ESPHome chama este endpoint
+diretamente (`quadra_id` fixo por botão, hardcoded no YAML de cada
+dispositivo). Uma instância de Home Assistant já existe na infraestrutura
+do usuário, mas não faz parte desse fluxo.
 
 ## Onde os vídeos ficam salvos
 
@@ -41,7 +46,7 @@ variável de ambiente (ver `api/config.py`):
 
 | | Variável | Default | O que tem | Ciclo de vida |
 |---|---|---|---|---|
-| **Buffer bruto** | `BUFFER_ROOT` | `/var/replay` | Segmentos de 5s contínuos, um subdiretório por `quadra_id` (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) | Descartável — apagado pelo cron (`scripts/cleanup_segments.sh`) depois de ~3min. Em produção fica em **tmpfs** (RAM), não em disco. |
+| **Buffer bruto** | `BUFFER_ROOT` | `/var/replay` | Segmentos de 3s contínuos, um subdiretório por `quadra_id` (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) | Descartável — retenção fixa de **2 minutos**, nada mais (`scripts/cleanup_segments.sh`, default `max_age_min=2`). Em produção fica em **tmpfs** (RAM), não em disco. |
 | **Clipes finais** | `OUTPUT_DIR` | `/var/replay/output` | Um arquivo por evento de replay: `<quadra_id>_<timestamp>.mp4` | Persistente, em disco de verdade. Retenção pública ainda é um placeholder (ver "Decisões pendentes" no contexto do projeto). |
 
 O `OUTPUT_DIR` é montado pela API em `/clips` (via `StaticFiles`), então
@@ -49,12 +54,21 @@ todo clipe final já sai acessível publicamente em:
 ```
 GET /clips/<quadra_id>_<timestamp>.mp4
 ```
-Essa é a mesma URL que a futura página pública da quadra (`GET /quadra/{quadra_id}`,
-ainda não implementada) vai usar pra listar/exibir os replays.
+Essa é a mesma URL que a página pública da quadra (`GET /quadra/{quadra_id}`,
+ver seção "Endpoint da API") usa pra listar/exibir os replays.
 
 ## Como configurar quais câmeras são capturadas
 
 Fonte única de verdade: **`config/cameras.json`**.
+
+> **Este arquivo tem credencial RTSP real e está no `.gitignore`** — o
+> repositório é público, nunca commitar `config/cameras.json` de verdade.
+> Use `config/cameras.example.json` (esse sim commitado, com placeholders)
+> como ponto de partida:
+> ```bash
+> cp config/cameras.example.json config/cameras.json
+> # depois edite config/cameras.json com os input_url reais
+> ```
 
 ```json
 {
@@ -107,6 +121,11 @@ POST /replay/{quadra_id}
   ```
 
 ```
+GET /quadra/{quadra_id}   -> página pública (HTML, sem login) listando os
+                              replays dessa quadra, mais recente primeiro,
+                              com <video controls> embutido. Lê direto do
+                              disco (OUTPUT_DIR) — não depende de Postgres.
+                              404 se quadra_id não estiver em cameras.json.
 GET /clips/<arquivo>.mp4   -> serve o clipe final (StaticFiles sobre OUTPUT_DIR)
 GET /health                -> healthcheck simples
 ```
@@ -120,8 +139,24 @@ razoável pra dev local:
 | `OUTPUT_DIR` | `/var/replay/output` | Onde gravar/servir os clipes finais |
 | `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras conhecidas |
 | `CLIP_DURATION_SECONDS` | `45` | Duração do clipe cortado |
-| `SEGMENT_TIME` | `5` | Precisa bater com o valor usado por `capture_camera.sh` |
+| `SEGMENT_TIME` | `3` | Precisa bater com o valor usado por `capture_camera.sh` |
 | `SAFETY_MARGIN` | `2.0` | Margem (segundos) pra considerar um segmento "fechado" |
+| `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~16s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
+
+> **Nota sobre buffer travado:** se a câmera travar/desconectar mas o
+> processo de captura continuar rodando (não crasha, só para de receber
+> quadro novo), o buffer fica "parado" com segmentos cada vez mais velhos.
+> Sem proteção, o corte usaria esses segmentos velhos e devolveria `200`
+> com um clipe que não é o retroativo real (aconteceu de verdade em
+> 2026-09-15, gap de ~10min na câmera). Por isso existe `MAX_STALENESS_SECONDS`:
+> se o segmento mais recente for mais velho que isso, a API falha
+> explicitamente (`500`) em vez de mascarar o problema com um clipe errado.
+
+> **Nota sobre timeout do cliente:** com câmera real em 1080p, o corte
+> (concat + reencode) leva ~7-8s neste servidor — bem mais que com a fonte
+> sintética dos testes. Qualquer cliente que chame `POST /replay/{quadra_id}`
+> (o firmware do botão incluso) precisa de um timeout generoso (usamos 15s
+> no ESPHome); um timeout de poucos segundos vai dar falso-negativo.
 
 > **Nota sobre 40s vs 45s:** o documento de contexto original do projeto
 > menciona 40s ("De olho no lance"); o valor usado agora é 45s (pedido
@@ -141,17 +176,51 @@ clipper/
   clip_generator.py     -> Corte dos últimos N segundos, com proteção contra
                             o segmento ainda sendo escrito (race condition)
 config/
-  cameras.json          -> Registro central de câmeras (fonte única de verdade)
+  cameras.json          -> Registro central de câmeras (fonte única de verdade;
+                            gitignored — tem credencial real, nunca commitado)
+  cameras.example.json  -> Template commitado, copiar pra cameras.json
 systemd/
   replay-capture@.service   -> Unit template (1 instância por câmera)
   env-examples/              -> Exemplo de .env por câmera
 scripts/
   generate_camera_envs.py   -> Gera os .env de systemd a partir de cameras.json
-  cleanup_segments.sh       -> Limpeza do buffer bruto (rodar via cron)
+  cleanup_segments.sh       -> Um passe de limpeza do buffer (retenção: últimos 2min)
+  cleanup_loop.sh           -> Roda cleanup_segments.sh em loop (usado pelo start.sh
+                                enquanto o cron real de produção não existe)
 test/
   run_pipeline_test.sh   -> Testa capture + clipper direto (sem API, sem câmera real)
   run_api_test.sh        -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
+start.sh                  -> Sobe venv/deps, roda os testes padrão, a API, a captura de
+                              cada câmera e a limpeza do buffer
 ```
+
+## Como rodar (jeito rápido)
+
+```bash
+./start.sh
+```
+
+Faz tudo de uma vez: cria/atualiza o venv (`.venv/`), confere `ffmpeg`,
+roda os dois testes padrão abaixo (com log em `logs/test_*.log` e
+feedback `[OK]`/`[FALHOU]` no terminal) e, por fim, garante que a API, a
+captura de cada câmera de `config/cameras.json` **e a limpeza do buffer**
+estejam no ar — sem subir duplicata se já estiverem rodando (checa PID em
+`run/*.pid`). No final imprime as URLs úteis (`/health`, `/quadra/<id>`
+de cada câmera).
+
+A limpeza (`scripts/cleanup_loop.sh`) roda `cleanup_segments.sh` a cada
+30s, mantendo só os **últimos 2 minutos** de buffer bruto — o resto é
+apagado. Isso vale tanto pra segmentos antigos que já estavam acumulados
+quanto pros novos que forem chegando; não depende de cron do sistema
+estar instalado.
+
+Pra parar um serviço subido por ele: `kill $(cat run/api.pid)` (ou o
+`run/capture_<quadra_id>.pid` / `run/cleanup.pid` correspondente).
+
+Isso é um jeito manual de "subir tudo" pra essa fase de desenvolvimento —
+**não substitui** os units systemd (produção real ainda depende do que
+está pendente em "Próximos passos": unit da própria API, tmpfs, cron real
+de sistema em vez do loop do `start.sh`).
 
 ## Como testar localmente (sem câmera real, sem hardware)
 
@@ -186,14 +255,21 @@ mesmo padrão do `replay-capture@.service`.)
 
 ## Próximos passos
 
-1. ✅ Buffer contínuo + corte de clipe (validado sem hardware).
+1. ✅ Buffer contínuo + corte de clipe (validado sem hardware, depois com
+   câmera RTSP real).
 2. ✅ Endpoint `POST /replay/{quadra_id}` acionando o corte (validado com
-   requisição HTTP real).
-3. ⬜ Botão físico: WT32-ETH01 + ESPHome (um microcontrolador por local,
-   até 8 botões) + automação no Home Assistant chamando este endpoint.
-4. ⬜ Persistência em Postgres da tabela `Replay` (hoje o corte só grava o
+   requisição HTTP real e, em 2026-09-15, com botão físico real).
+3. ✅ `GET /quadra/{quadra_id}` pública (lista os replays recentes, direto
+   do disco). Falta estilizar/melhorar visualmente.
+4. 🔶 Botão físico: ESPHome chamando este endpoint direto (sem HA)
+   validado com devkit **ESP8266** de bring-up. Falta comprar/testar o
+   devkit **ESP32 + módulo Ethernet W5500** definitivo e replicar pros
+   demais botões/locais.
+5. ⬜ Persistência em Postgres da tabela `Replay` (hoje o corte só grava o
    arquivo; não há registro em banco ainda).
-5. ⬜ `GET /quadra/{quadra_id}` pública (lista os replays recentes) e
-   `/admin` protegido (HTTP Basic).
-6. ⬜ Unit systemd pra rodar a própria API (hoje só documentado, não
-   incluído).
+6. ⬜ `/admin` protegido (HTTP Basic).
+7. 🔶 Limpeza do buffer (retenção fixa de 2min) — funcionando via
+   `scripts/cleanup_loop.sh`, subido automaticamente pelo `start.sh`. Cron
+   real de sistema (produção com systemd) ainda não instalado.
+8. ⬜ Unit systemd pra rodar a própria API (hoje só documentado/via
+   `start.sh` manual, não incluído como serviço de sistema).

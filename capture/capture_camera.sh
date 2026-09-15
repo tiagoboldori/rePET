@@ -24,7 +24,7 @@ set -euo pipefail
 QUADRA_ID="${1:?uso: capture_camera.sh <quadra_id> <input_url> <buffer_root> [segment_time]}"
 INPUT_URL="${2:?input_url obrigatório (rtsp://... para câmera real, ou lavfi:... para teste)}"
 BUFFER_ROOT="${3:?buffer_root obrigatório (ex: /var/replay)}"
-SEGMENT_TIME="${4:-5}"
+SEGMENT_TIME="${4:-3}"
 
 OUT_DIR="${BUFFER_ROOT}/${QUADRA_ID}"
 mkdir -p "$OUT_DIR"

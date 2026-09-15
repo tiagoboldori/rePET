@@ -17,7 +17,7 @@ QUADRA_ID="test-quadra1"
 WORKDIR="/tmp/replay-pipeline-test"
 BUFFER_ROOT="${WORKDIR}/buffer"
 OUTPUT_DIR="${WORKDIR}/output"
-SEGMENT_TIME=5
+SEGMENT_TIME=3
 CLIP_DURATION=45
 WARMUP_SECONDS=55   # > CLIP_DURATION + folga, pra garantir buffer suficiente
 

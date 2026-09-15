@@ -108,8 +108,9 @@ def generate_clip(
     buffer_root: Path,
     output_dir: Path,
     duration_seconds: float = 45,
-    segment_time: int = 5,
+    segment_time: int = 3,
     safety_margin: float = 2.0,
+    max_staleness_seconds: float | None = None,
 ) -> Path:
     """Gera o clipe final dos últimos `duration_seconds` segundos de uma
     quadra e grava no disco persistente (output_dir). Retorna o Path final.
@@ -118,8 +119,28 @@ def generate_clip(
     if not buffer_dir.is_dir():
         raise ClipGenerationError(f"Diretório de buffer não existe: {buffer_dir}")
 
-    closed = list_closed_segments(buffer_dir, segment_time, safety_margin)
+    now = datetime.now()
+    closed = list_closed_segments(buffer_dir, segment_time, safety_margin, now=now)
     selected = select_segments_for_duration(closed, duration_seconds, segment_time)
+
+    # Protege contra buffer "parado" (câmera travou/desconectou e o
+    # capture_camera.sh continua rodando, mas sem receber quadro novo):
+    # sem isso, o corte usaria os últimos segmentos DISPONÍVEIS, mesmo que
+    # estejam velhos, e devolveria sucesso com um clipe que não é o
+    # retroativo real do momento do trigger.
+    staleness = (now - selected[-1].start_time).total_seconds()
+    max_staleness_seconds = (
+        max_staleness_seconds
+        if max_staleness_seconds is not None
+        else 3 * segment_time + safety_margin + 5
+    )
+    if staleness > max_staleness_seconds:
+        raise ClipGenerationError(
+            f"Buffer de '{quadra_id}' parece parado: segmento mais recente "
+            f"tem {staleness:.0f}s de idade (esperado <= {max_staleness_seconds:.0f}s). "
+            "A câmera pode estar travada, desconectada ou o capture_camera.sh "
+            "não está recebendo dados novos — confira o processo/log da captura."
+        )
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -170,7 +191,7 @@ def _cli() -> None:
     parser.add_argument("buffer_root", type=Path)
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--duration", type=float, default=45)
-    parser.add_argument("--segment-time", type=int, default=5)
+    parser.add_argument("--segment-time", type=int, default=3)
     parser.add_argument("--safety-margin", type=float, default=2.0)
     args = parser.parse_args()
 
