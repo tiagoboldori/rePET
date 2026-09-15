@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+clip_generator.py — corta o clipe final (últimos N segundos) a partir do
+buffer contínuo de segmentos gravado por capture_camera.sh.
+
+Chamado pelo handler de `POST /replay/{quadra_id}` quando o botão físico é
+pressionado (fase seguinte do projeto). Por enquanto, testável isoladamente
+via CLI ou pelo test/run_pipeline_test.sh.
+
+Race condition tratada (conforme já sinalizado no contexto do projeto):
+o segmento mais recente pode ainda estar sendo escrito pelo ffmpeg no
+momento exato do trigger. Um segmento só é considerado "fechado" (seguro
+pra usar) se seu horário de início for anterior a
+    agora - (segment_time + safety_margin)
+ou seja, se já deu tempo do ffmpeg ter rotacionado pro próximo arquivo.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+
+SEGMENT_RE = re.compile(r"^seg_(\d{14})\.mp4$")  # seg_YYYYMMDDHHMMSS.mp4
+
+
+class ClipGenerationError(RuntimeError):
+    pass
+
+
+@dataclass
+class Segment:
+    path: Path
+    start_time: datetime
+
+
+def _parse_segment(path: Path) -> Segment | None:
+    m = SEGMENT_RE.match(path.name)
+    if not m:
+        return None
+    start_time = datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+    return Segment(path=path, start_time=start_time)
+
+
+def list_closed_segments(
+    buffer_dir: Path,
+    segment_time: int,
+    safety_margin: float,
+    now: datetime | None = None,
+) -> list[Segment]:
+    """Lista, em ordem cronológica, os segmentos considerados fechados
+    (ou seja, o ffmpeg quase certamente já rotacionou pra frente deles)."""
+    now = now or datetime.now()
+    cutoff = now - timedelta(seconds=segment_time + safety_margin)
+
+    segments = []
+    for p in buffer_dir.glob("seg_*.mp4"):
+        seg = _parse_segment(p)
+        if seg is None:
+            continue
+        if seg.start_time <= cutoff:
+            segments.append(seg)
+
+    segments.sort(key=lambda s: s.start_time)
+    return segments
+
+
+def select_segments_for_duration(
+    segments: list[Segment], duration_seconds: float, segment_time: int
+) -> list[Segment]:
+    """Pega, a partir do fim da lista (mais recentes primeiro), segmentos
+    fechados suficientes para cobrir >= duration_seconds de vídeo, com uma
+    folga de 1 segmento extra pra garantir margem no corte final."""
+    if not segments:
+        raise ClipGenerationError(
+            "Nenhum segmento fechado disponível no buffer ainda "
+            "(câmera muito recente ou buffer vazio)."
+        )
+
+    needed = int(duration_seconds // segment_time) + 2  # +2 = folga de segurança
+    selected = segments[-needed:] if len(segments) > needed else segments
+
+    covered = len(selected) * segment_time
+    if covered < duration_seconds:
+        # Best-effort: usa o que tem, mas avisa — pode acontecer logo nos
+        # primeiros segundos de vida de uma câmera recém-ligada.
+        print(
+            f"[clip_generator] aviso: buffer só cobre ~{covered}s "
+            f"(< {duration_seconds}s pedidos) — gerando clipe mais curto.",
+            file=sys.stderr,
+        )
+    return selected
+
+
+def _run(cmd: list[str]) -> None:
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ClipGenerationError(
+            f"Comando falhou ({' '.join(cmd)}):\n{result.stderr}"
+        )
+
+
+def generate_clip(
+    quadra_id: str,
+    buffer_root: Path,
+    output_dir: Path,
+    duration_seconds: float = 45,
+    segment_time: int = 5,
+    safety_margin: float = 2.0,
+) -> Path:
+    """Gera o clipe final dos últimos `duration_seconds` segundos de uma
+    quadra e grava no disco persistente (output_dir). Retorna o Path final.
+    """
+    buffer_dir = Path(buffer_root) / quadra_id
+    if not buffer_dir.is_dir():
+        raise ClipGenerationError(f"Diretório de buffer não existe: {buffer_dir}")
+
+    closed = list_closed_segments(buffer_dir, segment_time, safety_margin)
+    selected = select_segments_for_duration(closed, duration_seconds, segment_time)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    concat_list = output_dir / f".concat_{quadra_id}_{ts}.txt"
+    temp_concat = output_dir / f".temp_{quadra_id}_{ts}.mp4"
+    final_clip = output_dir / f"{quadra_id}_{ts}.mp4"
+
+    try:
+        # 1) Concatena os segmentos brutos selecionados (-c copy, rápido,
+        #    sem reencode) num arquivo temporário.
+        concat_list.write_text(
+            "\n".join(f"file '{s.path.resolve()}'" for s in selected) + "\n"
+        )
+        _run(
+            [
+                "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                "-c", "copy", str(temp_concat),
+            ]
+        )
+
+        # 2) Corte final: pega só os últimos `duration_seconds` a partir do
+        #    fim do arquivo concatenado. Reencode leve aqui é o que garante
+        #    um corte limpo (não preso a alinhamento de keyframe).
+        _run(
+            [
+                "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                "-sseof", f"-{duration_seconds}",
+                "-i", str(temp_concat),
+                "-c:v", "libx264", "-preset", "veryfast",
+                str(final_clip),
+            ]
+        )
+    finally:
+        concat_list.unlink(missing_ok=True)
+        temp_concat.unlink(missing_ok=True)
+
+    return final_clip
+
+
+def _cli() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Gera clipe dos últimos N segundos.")
+    parser.add_argument("quadra_id")
+    parser.add_argument("buffer_root", type=Path)
+    parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--duration", type=float, default=45)
+    parser.add_argument("--segment-time", type=int, default=5)
+    parser.add_argument("--safety-margin", type=float, default=2.0)
+    args = parser.parse_args()
+
+    clip = generate_clip(
+        args.quadra_id,
+        args.buffer_root,
+        args.output_dir,
+        duration_seconds=args.duration,
+        segment_time=args.segment_time,
+        safety_margin=args.safety_margin,
+    )
+    print(str(clip))
+
+
+if __name__ == "__main__":
+    _cli()

@@ -1,0 +1,16 @@
+[Unit]
+Description=Captura contínua de vídeo (buffer) - quadra %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/replay-system/cameras/%i.env
+ExecStart=/opt/replay-system/capture/capture_camera.sh %i ${INPUT_URL} ${BUFFER_ROOT} ${SEGMENT_TIME}
+Restart=always
+RestartSec=2
+User=replay
+Group=replay
+
+[Install]
+WantedBy=multi-user.target
