@@ -26,6 +26,11 @@ CLIP_DURATION_SECONDS = float(os.environ.get("CLIP_DURATION_SECONDS", "45"))
 SEGMENT_TIME = int(os.environ.get("SEGMENT_TIME", "3"))
 SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN", "2.0"))
 
+# Intervalo mínimo (segundos) entre dois acionamentos da MESMA quadra.
+# Uma segunda chamada antes disso passar recebe 429 em vez de disparar
+# outro corte (protege contra clique duplo/repique do botão físico).
+TRIGGER_COOLDOWN_SECONDS = float(os.environ.get("TRIGGER_COOLDOWN_SECONDS", "15"))
+
 # Se o segmento fechado mais recente do buffer for mais velho que isso
 # (câmera travada/desconectada, mas o capture_camera.sh ainda rodando),
 # o corte falha em vez de devolver um clipe com conteúdo velho/errado.

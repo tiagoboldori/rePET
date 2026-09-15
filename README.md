@@ -25,10 +25,10 @@ Existem duas coisas bem separadas, com ciclos de vida diferentes:
 2. **Corte do clipe final (acionado por evento).**
    Só acontece quando alguém chama `POST /replay/{quadra_id}` na API.
    Esse é o evento — hoje simulado manualmente ou via `curl`; na versão
-   final, disparado pelo Home Assistant quando o botão físico da quadra é
-   pressionado. Cada chamada corta os últimos N segundos **a partir do
-   instante exato em que a chamada chega** e grava um arquivo novo no
-   disco persistente.
+   final, disparado pelo firmware ESPHome direto quando o botão físico da
+   quadra é pressionado (sem Home Assistant no meio, ver abaixo). Cada
+   chamada corta os últimos N segundos **a partir do instante exato em
+   que a chamada chega** e grava um arquivo novo no disco persistente.
 
 Cadeia do botão (validada com hardware real em 2026-09-15):
 ```
@@ -38,6 +38,30 @@ Sem Home Assistant no meio — o firmware ESPHome chama este endpoint
 diretamente (`quadra_id` fixo por botão, hardcoded no YAML de cada
 dispositivo). Uma instância de Home Assistant já existe na infraestrutura
 do usuário, mas não faz parte desse fluxo.
+
+### Hardware do hub de botões
+
+| | Placa | Status |
+|---|---|---|
+| **Usada no bring-up (2026-09-15)** | Devkit **ESP8266** vendido como "NodeMCU V3" (chip `ESP8266MOD`) | Só validou a lógica software (Wi-Fi + HTTP + GPIO). **Não é a placa definitiva** — ESP8266 não roda o componente `ethernet:` do ESPHome (é ESP32-only), então não suporta o módulo Ethernet planejado. |
+| **Definitiva (planejada, ainda não comprada)** | Devkit **ESP32** genérico (board ESPHome `esp32dev`, tipicamente vendido como "ESP32 DevKitC" ou "NodeMCU-32S", chip `ESP-WROOM-32`) + módulo Ethernet **W5500** por SPI | Suporta `ethernet:` do ESPHome nativamente; ver orçamento de pinos abaixo pra confirmar que cabe 1 hub por local com até 8 botões. |
+
+**Confirmação: cabe 8 botões + W5500 na mesma placa, com folga.** O W5500 via SPI usa só 6 pinos (config já usada nos exemplos deste repo):
+
+| Função | GPIO sugerido |
+|---|---|
+| SCK | 18 |
+| MISO | 19 |
+| MOSI | 23 |
+| CS | 5 |
+| INT | 4 |
+| RST | 14 |
+
+Um devkit ESP32 de 30 ou 38 pinos (`esp32dev`) expõe ~22-25 GPIOs utilizáveis no total (descontando os pinos internos de flash, que nem saem no header). Subtraindo os 6 acima reservados pro W5500, sobram **16+ GPIOs livres** — o dobro do que os 8 botões precisam. Sugestão de 8 pinos pros botões, evitando os de boot-strap (`0, 2, 12, 15`) e preferindo os com pull-up interno disponível (os input-only `34/35/36/39` exigiriam resistor pull-up externo, então ficam como reserva se precisar de mais de 8):
+```
+botões: GPIO 13, 16, 17, 21, 22, 25, 26, 27
+```
+Ou seja: **não precisa de expansor de GPIO** — é exatamente o motivo pelo qual o WT32-ETH01 (que usa RMII/LAN8720, ~9-10 pinos fixos só pra Ethernet) foi descartado em favor desse devkit + W5500 (ver decisão em "Contexto do projeto").
 
 ## Onde os vídeos ficam salvos
 
@@ -110,6 +134,10 @@ POST /replay/{quadra_id}
 ```
 - Sem corpo — o `quadra_id` na URL já é toda a informação necessária.
 - `404` se `quadra_id` não estiver em `config/cameras.json`.
+- `429` se essa MESMA quadra já foi acionada há menos de `TRIGGER_COOLDOWN_SECONDS` (default 15s) — protege contra clique duplo/repique do botão físico. Outras quadras não são afetadas (cooldown é por `quadra_id`). Resposta inclui quanto falta esperar:
+  ```json
+  {"detail": "Aguarde mais 9.7s antes de acionar 'loc1-quadra1' de novo (intervalo mínimo: 15s)."}
+  ```
 - `500` se o corte falhar (ex.: buffer vazio/câmera não está gravando ainda).
 - `200` com:
   ```json
@@ -142,6 +170,7 @@ razoável pra dev local:
 | `SEGMENT_TIME` | `3` | Precisa bater com o valor usado por `capture_camera.sh` |
 | `SAFETY_MARGIN` | `2.0` | Margem (segundos) pra considerar um segmento "fechado" |
 | `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~16s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
+| `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo entre dois acionamentos da MESMA quadra — uma segunda chamada antes disso recebe `429` em vez de disparar outro corte |
 
 > **Nota sobre buffer travado:** se a câmera travar/desconectar mas o
 > processo de captura continuar rodando (não crasha, só para de receber

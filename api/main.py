@@ -3,15 +3,17 @@ main.py — API do backend central.
 
 Endpoint principal desta fase:
     POST /replay/{quadra_id}
-Este é o endpoint que a automação do Home Assistant chama (via
-`rest_command`) quando o botão físico de uma quadra é pressionado — ver
-"Papel do Home Assistant" no contexto do projeto. O ESP fala com o HA via
-webhook genérico; o HA é quem sabe transformar isso numa chamada
-específica pra este endpoint, com o quadra_id certo na URL.
+Este é o endpoint que o firmware ESPHome do botão físico chama direto
+(via `http_request.post`) quando o botão daquela quadra é pressionado —
+sem Home Assistant no meio. Não recebe corpo — o `quadra_id` na URL já é
+toda a informação necessária.
 
 Rodar localmente (dev):
     uvicorn api.main:app --reload --port 8000
 """
+import threading
+from datetime import datetime
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,15 +28,19 @@ app = FastAPI(title="Replay System — backend central")
 config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/clips", StaticFiles(directory=str(config.OUTPUT_DIR)), name="clips")
 
+# Intervalo mínimo entre acionamentos da MESMA quadra — protege contra
+# clique duplo/repique do botão físico e contra dois cortes (caros, ~5-8s
+# de ffmpeg) rodando ao mesmo tempo pra mesma câmera.
+_last_trigger: dict[str, datetime] = {}
+_trigger_lock = threading.Lock()
+
 
 @app.post("/replay/{quadra_id}")
 def trigger_replay(quadra_id: str):
     """Aciona o corte do clipe dos últimos N segundos para `quadra_id`.
 
-    Chamado pela automação do Home Assistant quando o botão físico daquela
-    quadra é pressionado. Não recebe corpo — o quadra_id na URL já é toda
-    a informação necessária (o momento do corte é "agora", no instante em
-    que esta chamada chega).
+    Chamado pelo firmware do botão físico daquela quadra. O momento do
+    corte é "agora", no instante em que esta chamada chega.
     """
     cameras = config.load_cameras()
     if quadra_id not in cameras:
@@ -45,6 +51,23 @@ def trigger_replay(quadra_id: str):
                 "Confira config/cameras.json."
             ),
         )
+
+    now = datetime.now()
+    with _trigger_lock:
+        last = _last_trigger.get(quadra_id)
+        if last is not None:
+            elapsed = (now - last).total_seconds()
+            if elapsed < config.TRIGGER_COOLDOWN_SECONDS:
+                wait = config.TRIGGER_COOLDOWN_SECONDS - elapsed
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Aguarde mais {wait:.1f}s antes de acionar "
+                        f"'{quadra_id}' de novo (intervalo mínimo: "
+                        f"{config.TRIGGER_COOLDOWN_SECONDS:.0f}s)."
+                    ),
+                )
+        _last_trigger[quadra_id] = now
 
     try:
         clip_path = generate_clip(
