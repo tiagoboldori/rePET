@@ -18,7 +18,7 @@ Existem duas coisas bem separadas, com ciclos de vida diferentes:
 
 1. **Captura contínua (nunca para, não depende de evento nenhum).**
    Um processo `ffmpeg` por câmera fica gravando 24/7, cortando o vídeo
-   bruto em segmentos de 3s dentro do **buffer**. Isso é o que permite
+   bruto em segmentos de 2s dentro do **buffer**. Isso é o que permite
    existir um "últimos 45 segundos" pra olhar pra trás a qualquer momento.
    Roda como um serviço systemd por câmera (`replay-capture@<quadra_id>`).
 
@@ -70,7 +70,7 @@ variável de ambiente (ver `api/config.py`):
 
 | | Variável | Default | O que tem | Ciclo de vida |
 |---|---|---|---|---|
-| **Buffer bruto** | `BUFFER_ROOT` | `/var/replay` | Segmentos de 3s contínuos, um subdiretório por `quadra_id` (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) | Descartável — retenção fixa de **2 minutos**, nada mais (`scripts/cleanup_segments.sh`, default `max_age_min=2`). Em produção fica em **tmpfs** (RAM), não em disco. |
+| **Buffer bruto** | `BUFFER_ROOT` | `/var/replay` | Segmentos de 2s contínuos, um subdiretório por `quadra_id` (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) | Descartável — retenção fixa de **2 minutos**, nada mais (`scripts/cleanup_segments.sh`, default `max_age_min=2`). Em produção fica em **tmpfs** (RAM), não em disco. |
 | **Clipes finais** | `OUTPUT_DIR` | `/var/replay/output` | Um arquivo por evento de replay: `<quadra_id>_<timestamp>.mp4` | Persistente, em disco de verdade. Retenção pública ainda é um placeholder (ver "Decisões pendentes" no contexto do projeto). |
 
 O `OUTPUT_DIR` é montado pela API em `/clips` (via `StaticFiles`), então
@@ -167,9 +167,9 @@ razoável pra dev local:
 | `OUTPUT_DIR` | `/var/replay/output` | Onde gravar/servir os clipes finais |
 | `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras conhecidas |
 | `CLIP_DURATION_SECONDS` | `45` | Duração do clipe cortado |
-| `SEGMENT_TIME` | `3` | Precisa bater com o valor usado por `capture_camera.sh` |
+| `SEGMENT_TIME` | `2` | Precisa bater com o valor usado por `capture_camera.sh` |
 | `SAFETY_MARGIN` | `2.0` | Margem (segundos) pra considerar um segmento "fechado" |
-| `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~16s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
+| `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~13s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
 | `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo entre dois acionamentos da MESMA quadra — uma segunda chamada antes disso recebe `429` em vez de disparar outro corte |
 
 > **Nota sobre buffer travado:** se a câmera travar/desconectar mas o
@@ -186,6 +186,15 @@ razoável pra dev local:
 > sintética dos testes. Qualquer cliente que chame `POST /replay/{quadra_id}`
 > (o firmware do botão incluso) precisa de um timeout generoso (usamos 15s
 > no ESPHome); um timeout de poucos segundos vai dar falso-negativo.
+>
+> **Por que o trim final reencoda em vez de usar `-c copy`:** já foi testado
+> (2026-09-16) — a câmera real entrega HEVC, e um trim com `-c copy` preserva
+> esse codec no clipe final, que não toca de forma confiável na maioria dos
+> navegadores/celulares (fora do ecossistema Apple). O reencode pra H.264
+> aqui não é só sobre precisão de corte, é sobre compatibilidade de
+> reprodução — não trocar por `-c copy` sem resolver isso na origem (ex.:
+> configurar a câmera pra H.264, se ela permitir) e testar de novo em
+> dispositivo real.
 
 > **Nota sobre 40s vs 45s:** o documento de contexto original do projeto
 > menciona 40s ("De olho no lance"); o valor usado agora é 45s (pedido

@@ -9,10 +9,14 @@ via CLI ou pelo test/run_pipeline_test.sh.
 
 Race condition tratada (conforme já sinalizado no contexto do projeto):
 o segmento mais recente pode ainda estar sendo escrito pelo ffmpeg no
-momento exato do trigger. Um segmento só é considerado "fechado" (seguro
-pra usar) se seu horário de início for anterior a
-    agora - (segment_time + safety_margin)
-ou seja, se já deu tempo do ffmpeg ter rotacionado pro próximo arquivo.
+momento exato do trigger. O `-f segment` do ffmpeg escreve um arquivo por
+vez (nunca dois em paralelo): assim que aparece um segmento NOVO no
+buffer, o anterior já foi fechado/finalizado. Por isso só o ÚLTIMO
+segmento (o mais recente por horário de início) é tratado como
+"possivelmente ainda sendo escrito" — todos os outros são considerados
+fechados independente de matemática de relógio. `safety_margin` continua
+existindo só como uma folga residual pequena (relógio do servidor vs.
+latência de escrita em disco), não é mais o que garante a segurança.
 """
 
 from __future__ import annotations
@@ -47,25 +51,32 @@ def _parse_segment(path: Path) -> Segment | None:
 
 def list_closed_segments(
     buffer_dir: Path,
-    segment_time: int,
     safety_margin: float,
     now: datetime | None = None,
 ) -> list[Segment]:
     """Lista, em ordem cronológica, os segmentos considerados fechados
-    (ou seja, o ffmpeg quase certamente já rotacionou pra frente deles)."""
+    (ou seja, o ffmpeg já rotacionou pra frente deles)."""
     now = now or datetime.now()
-    cutoff = now - timedelta(seconds=segment_time + safety_margin)
 
-    segments = []
+    all_segments = []
     for p in buffer_dir.glob("seg_*.mp4"):
         seg = _parse_segment(p)
-        if seg is None:
-            continue
-        if seg.start_time <= cutoff:
-            segments.append(seg)
+        if seg is not None:
+            all_segments.append(seg)
+    all_segments.sort(key=lambda s: s.start_time)
 
-    segments.sort(key=lambda s: s.start_time)
-    return segments
+    if not all_segments:
+        return []
+
+    # Só o segmento mais recente pode ainda estar sendo escrito — os
+    # demais já foram fechados pelo ffmpeg (ver docstring do módulo).
+    closed = all_segments[:-1]
+
+    # Folga residual pequena, não o `segment_time` inteiro: proteção extra
+    # contra relógio do servidor levemente adiantado/escrita em disco lenta,
+    # não é mais a defesa principal contra ler segmento em escrita.
+    cutoff = now - timedelta(seconds=safety_margin)
+    return [s for s in closed if s.start_time <= cutoff]
 
 
 def select_segments_for_duration(
@@ -108,8 +119,8 @@ def generate_clip(
     buffer_root: Path,
     output_dir: Path,
     duration_seconds: float = 45,
-    segment_time: int = 3,
-    safety_margin: float = 2.0,
+    segment_time: int = 2,
+    safety_margin: float = 0.5,
     max_staleness_seconds: float | None = None,
 ) -> Path:
     """Gera o clipe final dos últimos `duration_seconds` segundos de uma
@@ -120,7 +131,7 @@ def generate_clip(
         raise ClipGenerationError(f"Diretório de buffer não existe: {buffer_dir}")
 
     now = datetime.now()
-    closed = list_closed_segments(buffer_dir, segment_time, safety_margin, now=now)
+    closed = list_closed_segments(buffer_dir, safety_margin, now=now)
     selected = select_segments_for_duration(closed, duration_seconds, segment_time)
 
     # Protege contra buffer "parado" (câmera travou/desconectou e o
@@ -165,8 +176,11 @@ def generate_clip(
         )
 
         # 2) Corte final: pega só os últimos `duration_seconds` a partir do
-        #    fim do arquivo concatenado. Reencode leve aqui é o que garante
-        #    um corte limpo (não preso a alinhamento de keyframe).
+        #    fim do arquivo concatenado. Reencode pra H.264 aqui é o que
+        #    garante um corte limpo (não preso a alinhamento de keyframe) E
+        #    compatibilidade de reprodução — a câmera real entrega HEVC, que
+        #    não toca de forma confiável em boa parte dos navegadores/celulares
+        #    (testado em 2026-09-16: `-c copy` preserva HEVC e "não roda legal").
         _run(
             [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
@@ -191,8 +205,8 @@ def _cli() -> None:
     parser.add_argument("buffer_root", type=Path)
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--duration", type=float, default=45)
-    parser.add_argument("--segment-time", type=int, default=3)
-    parser.add_argument("--safety-margin", type=float, default=2.0)
+    parser.add_argument("--segment-time", type=int, default=2)
+    parser.add_argument("--safety-margin", type=float, default=0.5)
     args = parser.parse_args()
 
     clip = generate_clip(

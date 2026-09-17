@@ -23,8 +23,8 @@ CAMERAS_FILE = Path(
 )
 
 CLIP_DURATION_SECONDS = float(os.environ.get("CLIP_DURATION_SECONDS", "45"))
-SEGMENT_TIME = int(os.environ.get("SEGMENT_TIME", "3"))
-SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN", "2.0"))
+SEGMENT_TIME = int(os.environ.get("SEGMENT_TIME", "2"))
+SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN", "0.5"))
 
 # Intervalo mínimo (segundos) entre dois acionamentos da MESMA quadra.
 # Uma segunda chamada antes disso passar recebe 429 em vez de disparar

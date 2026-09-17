@@ -16,7 +16,7 @@ export BUFFER_ROOT="${WORKDIR}/buffer"
 export OUTPUT_DIR="${WORKDIR}/output"
 export CAMERAS_FILE="${ROOT}/config/cameras.json"
 export CLIP_DURATION_SECONDS=45
-export SEGMENT_TIME=3
+export SEGMENT_TIME=2
 
 rm -rf "$WORKDIR"
 mkdir -p "$BUFFER_ROOT" "$OUTPUT_DIR"

@@ -82,7 +82,7 @@ echo
 export BUFFER_ROOT="$ROOT/.data/buffer"
 export OUTPUT_DIR="$ROOT/.data/output"
 export CAMERAS_FILE="$ROOT/config/cameras.json"
-export SEGMENT_TIME=3   # precisa ser o mesmo valor pra API e pra captura — fonte única aqui
+export SEGMENT_TIME=2   # precisa ser o mesmo valor pra API e pra captura — fonte única aqui
 BUFFER_MAX_AGE_MIN=2    # retenção do buffer bruto: só os últimos 2min, nada mais
 mkdir -p "$BUFFER_ROOT" "$OUTPUT_DIR"
 
