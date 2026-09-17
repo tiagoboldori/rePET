@@ -57,6 +57,13 @@ echo
 info "Rodando testes padrão (cada um leva ~1min, logs em logs/test_*.log) ..."
 TESTS_OK=1
 
+if "$PY" -m pytest test/ >"$LOG_DIR/test_pytest.log" 2>&1; then
+    ok "pytest test/ (camada de persistência)"
+else
+    fail "pytest test/ (veja $LOG_DIR/test_pytest.log)"
+    TESTS_OK=0
+fi
+
 if PATH="$VENV/bin:$PATH" bash test/run_pipeline_test.sh >"$LOG_DIR/test_pipeline.log" 2>&1; then
     ok "test/run_pipeline_test.sh"
 else
@@ -82,6 +89,7 @@ echo
 export BUFFER_ROOT="$ROOT/.data/buffer"
 export OUTPUT_DIR="$ROOT/.data/output"
 export CAMERAS_FILE="$ROOT/config/cameras.json"
+export DATABASE_URL="sqlite:///$ROOT/.data/repet.db"   # lida por db/engine.py, ver README
 export SEGMENT_TIME=2   # precisa ser o mesmo valor pra API e pra captura — fonte única aqui
 BUFFER_MAX_AGE_MIN=2    # retenção do buffer bruto: só os últimos 2min, nada mais
 mkdir -p "$BUFFER_ROOT" "$OUTPUT_DIR"

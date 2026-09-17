@@ -200,6 +200,14 @@ razoável pra dev local:
 | `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~13s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
 | `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo entre dois acionamentos da MESMA quadra — uma segunda chamada antes disso recebe `429` em vez de disparar outro corte |
 
+> **`DATABASE_URL` não está na tabela acima de propósito:** é lida direto
+> por `db/engine.py`, não por `api/config.py` — mesmo padrão que
+> `capture_camera.sh` já usa (cada módulo se configura sozinho), porque o
+> futuro worker assíncrono de logo (não é a API) também vai precisar da
+> camada de persistência. Default: `sqlite:///.data/repet.db`. Ainda não é
+> usada por `api/main.py` (isso é PT-02, ver `PLANEJAMENTO.md`) — hoje só
+> existe a base (`db/`), sem nada gravando nela em produção.
+
 > **Nota sobre buffer travado:** se a câmera travar/desconectar mas o
 > processo de captura continuar rodando (não crasha, só para de receber
 > quadro novo), o buffer fica "parado" com segmentos cada vez mais velhos.
@@ -254,6 +262,13 @@ capture/
 clipper/
   clip_generator.py     -> Corte dos últimos N segundos, com proteção contra
                             o segmento ainda sendo escrito (race condition)
+db/
+  engine.py             -> Engine SQLite (modo WAL) + sessão (PT-01, ver
+                            PLANEJAMENTO.md). Ainda não é usado por api/main.py
+                            (isso é PT-02) — só a base de persistência por
+                            enquanto.
+  models.py             -> Modelo Replay (índice composto quadra_id+criado_em).
+                            Local/Esporte/Quadra/Logo entram em PT-10/PT-14.
 config/
   cameras.json          -> Registro central de câmeras (fonte única de verdade;
                             gitignored — tem credencial real, nunca commitado)
@@ -267,6 +282,8 @@ scripts/
   cleanup_loop.sh           -> Roda cleanup_segments.sh em loop (usado pelo start.sh
                                 enquanto o cron real de produção não existe)
 test/
+  test_db.py             -> pytest: camada de persistência (db/) — criação de
+                            tabela, índice e round-trip de insert/consulta
   run_pipeline_test.sh   -> Testa capture + clipper direto (sem API, sem câmera real)
   run_api_test.sh        -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
 start.sh                  -> Sobe venv/deps, roda os testes padrão, a API, a captura de
@@ -280,8 +297,9 @@ start.sh                  -> Sobe venv/deps, roda os testes padrão, a API, a ca
 ```
 
 Faz tudo de uma vez: cria/atualiza o venv (`.venv/`), confere `ffmpeg`,
-roda os dois testes padrão abaixo (com log em `logs/test_*.log` e
-feedback `[OK]`/`[FALHOU]` no terminal) e, por fim, garante que a API, a
+roda os testes padrão abaixo — `pytest test/` (camada de persistência) e os
+dois testes de shell (com log em `logs/test_*.log` e feedback
+`[OK]`/`[FALHOU]` no terminal) — e, por fim, garante que a API, a
 captura de cada câmera de `config/cameras.json` **e a limpeza do buffer**
 estejam no ar — sem subir duplicata se já estiverem rodando (checa PID em
 `run/*.pid`). No final imprime as URLs úteis (`/health`, `/quadra/<id>`
@@ -302,6 +320,13 @@ está pendente em "Próximos passos": unit da própria API, tmpfs, cron real
 de sistema em vez do loop do `start.sh`).
 
 ## Como testar localmente (sem câmera real, sem hardware)
+
+**Teste 0 — camada de persistência (`db/`), sem câmera/API nenhuma:**
+```bash
+python -m pytest test/test_db.py -v
+```
+Roda com `python -m pytest` (não `pytest` puro) — precisa do diretório raiz
+do repo no `sys.path` pra importar `db.models`, e `python -m` garante isso.
 
 Nenhum dos dois testes abaixo precisa de câmera de verdade — ambos usam uma
 fonte sintética (`ffmpeg testsrc`) no lugar do RTSP. Já rodei os dois aqui;
