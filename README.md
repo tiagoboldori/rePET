@@ -5,6 +5,15 @@ central** (100% centralizado — buffer, corte de clipe, API e página pública
 por quadra) e o **botão físico** (ESPHome), já validados de ponta a ponta
 com hardware e câmera reais em 2026-09-15.
 
+> **Escopo deste repositório (definido em 2026-09-17): isto é só o motor.**
+> Este projeto cobre captura, corte de clipe e uma **API de gerenciamento**
+> (endpoints JSON pra um admin consultar/alterar configuração do motor —
+> câmeras, retenção, duração de clipe, etc). **Não vai existir página de
+> admin aqui** — nenhuma UI web é planejada neste repositório. Qualquer
+> painel/frontend que consuma essa API de gerenciamento é responsabilidade
+> de outra equipe/projeto. Isso vale tanto pro futuro `/admin` quanto pra
+> qualquer nova funcionalidade de gerenciamento que for adicionada depois.
+
 O botão fala **direto com esta API** via HTTP — não existe Home Assistant
 no meio dessa chamada (decisão revisada; ver "Cadeia do botão" abaixo). O
 firmware de bring-up usado no primeiro teste foi um devkit **ESP8266**
@@ -318,7 +327,9 @@ mesmo padrão do `replay-capture@.service`.)
    demais botões/locais.
 5. ⬜ Persistência em Postgres da tabela `Replay` (hoje o corte só grava o
    arquivo; não há registro em banco ainda).
-6. ⬜ `/admin` protegido (HTTP Basic).
+6. ⬜ API de gerenciamento (`/admin`, protegida por HTTP Basic no MVP) —
+   só endpoints JSON, sem página web (ver nota de escopo no topo do
+   README). Frontend/painel que consumir essa API é de outro projeto.
 7. 🔶 Limpeza do buffer (retenção fixa de 2min) — funcionando via
    `scripts/cleanup_loop.sh`, subido automaticamente pelo `start.sh`. Cron
    real de sistema (produção com systemd) ainda não instalado.
