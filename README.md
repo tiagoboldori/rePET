@@ -181,28 +181,39 @@ razoável pra dev local:
 > se o segmento mais recente for mais velho que isso, a API falha
 > explicitamente (`500`) em vez de mascarar o problema com um clipe errado.
 
-> **Nota sobre timeout do cliente:** com câmera real em 1080p, o corte
-> (concat + reencode) leva ~7-8s neste servidor — bem mais que com a fonte
-> sintética dos testes. Qualquer cliente que chame `POST /replay/{quadra_id}`
-> (o firmware do botão incluso) precisa de um timeout generoso (usamos 15s
-> no ESPHome); um timeout de poucos segundos vai dar falso-negativo.
+> **Nota sobre timeout do cliente:** o corte final é `-c copy` (stream copy,
+> sem reencode, ver nota abaixo) — bem mais rápido que o reencode antigo.
+> Mesmo assim, qualquer cliente que chame `POST /replay/{quadra_id}` (o
+> firmware do botão incluso) deve manter um timeout generoso (usamos 15s no
+> ESPHome), pra cobrir variação de rede/RTSP.
 >
-> **Por que o trim final reencoda em vez de usar `-c copy`:** já foi testado
-> (2026-09-16) — a câmera real entrega HEVC, e um trim com `-c copy` preserva
-> esse codec no clipe final, que não toca de forma confiável na maioria dos
-> navegadores/celulares (fora do ecossistema Apple). O reencode pra H.264
-> aqui não é só sobre precisão de corte, é sobre compatibilidade de
-> reprodução — não trocar por `-c copy` sem resolver isso na origem (ex.:
-> configurar a câmera pra H.264, se ela permitir) e testar de novo em
-> dispositivo real.
+> **Por que o trim final usa `-c copy` em vez de reencodar:** até 2026-09-16
+> isso reencodava pra H.264 (`libx264 -preset veryfast`) porque a câmera real
+> entregava **HEVC**, e um trim com `-c copy` preservava esse codec no clipe
+> final, que não tocava de forma confiável fora do ecossistema Apple. **A
+> partir de 2026-09-17, as câmeras foram configuradas pra entregar H.264
+> nativamente** (ajuste feito na própria câmera, não no software), o que
+> removeu o motivo de reencodar — o trim voltou a usar `-c copy`, caindo de
+> ~1200% CPU/~5-8s por acionamento pra CPU quase zero e <1s. **Pré-requisito
+> que precisa continuar valendo:** toda câmera cadastrada em `cameras.json`
+> precisa estar configurada pra H.264 (não HEVC/outro codec) na própria
+> interface de admin dela — isso não é validado pelo software, é uma
+> configuração externa à câmera. Se alguma câmera nova/trocada vier em HEVC
+> de novo, o clipe final sai em HEVC e volta a ter problema de reprodução;
+> nesse caso, reencodar de novo (só pra aquela câmera, ou globalmente) é a
+> correção. Trade-off aceito do `-c copy`: o corte cai no keyframe mais
+> próximo antes do ponto pedido, não exatamente em `CLIP_DURATION_SECONDS` —
+> o clipe pode sair um pouco mais longo que o pedido (nunca mais curto).
 
 > **Nota sobre a duração do clipe:** o documento de contexto original do
 > projeto menciona 40s ("De olho no lance"); o valor passou por 45s e caiu
-> pra **35s** (2026-09-17, pra reduzir custo de CPU do reencode — o corte
-> final decodifica/reencoda só os últimos `CLIP_DURATION_SECONDS`, então o
-> custo escala ~linear com esse valor). Como é uma variável de ambiente e
-> não um valor fixo no código, trocar não exige mudança nenhuma no código —
-> só ajustar `CLIP_DURATION_SECONDS` quando o valor final for decidido.
+> pra **35s** (2026-09-17). Motivo original era CPU do reencode (que escalava
+> com a duração); depois desse mesmo dia o trim passou a usar `-c copy` (ver
+> nota acima), então hoje a duração não tem mais efeito relevante sobre CPU
+> — 35s ficou só como o valor de produto decidido. Como é uma variável de
+> ambiente e não um valor fixo no código, trocar não exige mudança nenhuma
+> no código — só ajustar `CLIP_DURATION_SECONDS` quando o valor final for
+> decidido.
 
 ## Estrutura do repositório
 

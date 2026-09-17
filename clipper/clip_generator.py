@@ -176,20 +176,31 @@ def generate_clip(
         )
 
         # 2) Corte final: pega só os últimos `duration_seconds` a partir do
-        #    fim do arquivo concatenado. Reencode pra H.264 aqui é o que
-        #    garante um corte limpo (não preso a alinhamento de keyframe) E
-        #    compatibilidade de reprodução — a câmera real entrega HEVC, que
-        #    não toca de forma confiável em boa parte dos navegadores/celulares
-        #    (testado em 2026-09-16: `-c copy` preserva HEVC e "não roda legal").
+        #    fim do arquivo concatenado. `-c copy` (sem reencode) — válido
+        #    porque as câmeras agora entregam H.264 nativamente (configurado
+        #    na própria câmera, ver README), então não existe mais o problema
+        #    de compatibilidade de reprodução que HEVC dava (motivo pelo qual
+        #    isso reencodava antes, ver nota no README). Trade-off aceito:
+        #    com stream copy o corte cai no keyframe mais próximo antes do
+        #    ponto pedido, não exatamente em `duration_seconds` — o clipe
+        #    final pode sair um pouco mais longo (nunca mais curto). Se
+        #    qualquer câmera voltar a entregar HEVC (ou outro codec não
+        #    suportado pelos players alvo), isso precisa voltar a reencodar.
         _run(
             [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
                 "-sseof", f"-{duration_seconds}",
                 "-i", str(temp_concat),
-                "-c:v", "libx264", "-preset", "veryfast",
+                "-c", "copy",
                 str(final_clip),
             ]
         )
+    except Exception:
+        # Se o ffmpeg do corte final falhar no meio da escrita, não deixa um
+        # arquivo corrompido/incompleto pra trás em OUTPUT_DIR — esse diretório
+        # é servido publicamente em /clips e listado em /quadra/{quadra_id}.
+        final_clip.unlink(missing_ok=True)
+        raise
     finally:
         concat_list.unlink(missing_ok=True)
         temp_concat.unlink(missing_ok=True)
