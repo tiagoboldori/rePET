@@ -15,7 +15,7 @@ WORKDIR="/tmp/replay-api-test"
 export BUFFER_ROOT="${WORKDIR}/buffer"
 export OUTPUT_DIR="${WORKDIR}/output"
 export CAMERAS_FILE="${ROOT}/config/cameras.json"
-export CLIP_DURATION_SECONDS=45
+export CLIP_DURATION_SECONDS=35
 export SEGMENT_TIME=2
 
 rm -rf "$WORKDIR"
@@ -36,10 +36,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== 3) Esperando a API e o buffer ficarem prontos (~55s) =="
+echo "== 3) Esperando a API e o buffer ficarem prontos (~48s) =="
 sleep 3
 curl -sf http://127.0.0.1:8123/health && echo " <- API respondendo"
-sleep 52
+sleep 45
 
 echo "== 4) Testando quadra_id DESCONHECIDO (deve dar 404) =="
 curl -s -o /tmp/replay-api-test/resp_404.json -w "HTTP %{http_code}\n" \

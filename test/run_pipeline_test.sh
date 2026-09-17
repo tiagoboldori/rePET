@@ -18,8 +18,8 @@ WORKDIR="/tmp/replay-pipeline-test"
 BUFFER_ROOT="${WORKDIR}/buffer"
 OUTPUT_DIR="${WORKDIR}/output"
 SEGMENT_TIME=2
-CLIP_DURATION=45
-WARMUP_SECONDS=55   # > CLIP_DURATION + folga, pra garantir buffer suficiente
+CLIP_DURATION=35
+WARMUP_SECONDS=45   # > CLIP_DURATION + folga, pra garantir buffer suficiente
 
 rm -rf "$WORKDIR"
 mkdir -p "$BUFFER_ROOT" "$OUTPUT_DIR"

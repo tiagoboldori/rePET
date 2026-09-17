@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cleanup_segments.sh — remove segmentos brutos antigos do buffer, mantendo
 # só os últimos MAX_AGE_MIN minutos de retroativo (default: 2min — dá folga
-# suficiente pra cobrir CLIP_DURATION_SECONDS=45s + margem de seleção).
+# suficiente pra cobrir CLIP_DURATION_SECONDS=35s + margem de seleção).
 # Rodar via cron a cada minuto (produção) ou via scripts/cleanup_loop.sh
 # (dev/bring-up, usado pelo start.sh). O clipe final (se algum foi gerado)
 # já foi copiado pro disco persistente antes disso, então apagar aqui é

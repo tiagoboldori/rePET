@@ -19,7 +19,7 @@ Existem duas coisas bem separadas, com ciclos de vida diferentes:
 1. **Captura contínua (nunca para, não depende de evento nenhum).**
    Um processo `ffmpeg` por câmera fica gravando 24/7, cortando o vídeo
    bruto em segmentos de 2s dentro do **buffer**. Isso é o que permite
-   existir um "últimos 45 segundos" pra olhar pra trás a qualquer momento.
+   existir um "últimos 35 segundos" pra olhar pra trás a qualquer momento.
    Roda como um serviço systemd por câmera (`replay-capture@<quadra_id>`).
 
 2. **Corte do clipe final (acionado por evento).**
@@ -166,7 +166,7 @@ razoável pra dev local:
 | `BUFFER_ROOT` | `/var/replay` | Onde estão os segmentos brutos |
 | `OUTPUT_DIR` | `/var/replay/output` | Onde gravar/servir os clipes finais |
 | `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras conhecidas |
-| `CLIP_DURATION_SECONDS` | `45` | Duração do clipe cortado |
+| `CLIP_DURATION_SECONDS` | `35` | Duração do clipe cortado |
 | `SEGMENT_TIME` | `2` | Precisa bater com o valor usado por `capture_camera.sh` |
 | `SAFETY_MARGIN` | `2.0` | Margem (segundos) pra considerar um segmento "fechado" |
 | `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~13s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
@@ -196,11 +196,13 @@ razoável pra dev local:
 > configurar a câmera pra H.264, se ela permitir) e testar de novo em
 > dispositivo real.
 
-> **Nota sobre 40s vs 45s:** o documento de contexto original do projeto
-> menciona 40s ("De olho no lance"); o valor usado agora é 45s (pedido
-> numa mensagem anterior). Como é uma variável de ambiente e não um valor
-> fixo no código, trocar não exige mudança nenhuma no código — só ajustar
-> `CLIP_DURATION_SECONDS` quando o valor final for decidido.
+> **Nota sobre a duração do clipe:** o documento de contexto original do
+> projeto menciona 40s ("De olho no lance"); o valor passou por 45s e caiu
+> pra **35s** (2026-09-17, pra reduzir custo de CPU do reencode — o corte
+> final decodifica/reencoda só os últimos `CLIP_DURATION_SECONDS`, então o
+> custo escala ~linear com esse valor). Como é uma variável de ambiente e
+> não um valor fixo no código, trocar não exige mudança nenhuma no código —
+> só ajustar `CLIP_DURATION_SECONDS` quando o valor final for decidido.
 
 ## Estrutura do repositório
 

@@ -22,7 +22,7 @@ CAMERAS_FILE = Path(
     )
 )
 
-CLIP_DURATION_SECONDS = float(os.environ.get("CLIP_DURATION_SECONDS", "45"))
+CLIP_DURATION_SECONDS = float(os.environ.get("CLIP_DURATION_SECONDS", "35"))
 SEGMENT_TIME = int(os.environ.get("SEGMENT_TIME", "2"))
 SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN", "0.5"))
 

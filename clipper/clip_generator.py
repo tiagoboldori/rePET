@@ -118,7 +118,7 @@ def generate_clip(
     quadra_id: str,
     buffer_root: Path,
     output_dir: Path,
-    duration_seconds: float = 45,
+    duration_seconds: float = 35,
     segment_time: int = 2,
     safety_margin: float = 0.5,
     max_staleness_seconds: float | None = None,
@@ -204,7 +204,7 @@ def _cli() -> None:
     parser.add_argument("quadra_id")
     parser.add_argument("buffer_root", type=Path)
     parser.add_argument("output_dir", type=Path)
-    parser.add_argument("--duration", type=float, default=45)
+    parser.add_argument("--duration", type=float, default=35)
     parser.add_argument("--segment-time", type=int, default=2)
     parser.add_argument("--safety-margin", type=float, default=0.5)
     args = parser.parse_args()
