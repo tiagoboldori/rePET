@@ -12,16 +12,34 @@ Rodar localmente (dev):
     uvicorn api.main:app --reload --port 8000
 """
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from sqlmodel import Session
 
 from api import config
-from clipper.clip_generator import ClipGenerationError, generate_clip
+from clipper.clip_generator import (
+    ClipGenerationError,
+    generate_clip,
+    probe_duration_seconds,
+)
+from db.engine import create_db_and_tables, engine, get_session
+from db.migrate_cameras import sync_cameras_from_file
+from db.models import Replay
 
-app = FastAPI(title="Replay System — backend central")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    create_db_and_tables()
+    with Session(engine) as session:
+        sync_cameras_from_file(session, config.CAMERAS_FILE)
+    yield
+
+
+app = FastAPI(title="Replay System — backend central", lifespan=lifespan)
 
 # Clipes finais (disco persistente) ficam acessíveis publicamente em
 # /clips/<arquivo>.mp4 — é o que a página pública de cada quadra vai listar.
@@ -36,7 +54,7 @@ _trigger_lock = threading.Lock()
 
 
 @app.post("/replay/{quadra_id}")
-def trigger_replay(quadra_id: str):
+def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
     """Aciona o corte do clipe dos últimos N segundos para `quadra_id`.
 
     Chamado pelo firmware do botão físico daquela quadra. O momento do
@@ -81,6 +99,25 @@ def trigger_replay(quadra_id: str):
         )
     except ClipGenerationError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Registro no banco (M3) é best-effort: o clipe já está em disco e
+    # servível nesse ponto — disco é a fonte de verdade final (RNF6), uma
+    # falha aqui não pode impedir a entrega do replay que já foi gerado
+    # com sucesso (mesmo princípio de RNF9 pra falha de logo). Reconciliação
+    # de linhas ausentes é PT-03, ainda não implementada.
+    try:
+        session.add(
+            Replay(
+                id=clip_path.stem,
+                quadra_id=quadra_id,
+                arquivo_bruto=clip_path.name,
+                duracao_segundos=probe_duration_seconds(clip_path),
+                tamanho_bytes=clip_path.stat().st_size,
+            )
+        )
+        session.commit()
+    except Exception as exc:  # noqa: BLE001 — best-effort, ver comentário acima
+        print(f"[api] aviso: falha ao registrar replay '{clip_path.stem}' no banco: {exc}")
 
     return {
         "quadra_id": quadra_id,

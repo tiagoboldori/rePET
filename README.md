@@ -107,12 +107,13 @@ Fonte única de verdade: **`config/cameras.json`**.
 {
   "quadra_id": "loc1-quadra1",
   "local_id": "loc1",
+  "esporte": "futsal",
   "nome": "Quadra 1",
   "input_url": "rtsp://user:senha@10.0.1.11:554/stream1"
 }
 ```
 
-Esse arquivo é usado em dois lugares:
+Esse arquivo é usado em três lugares:
 
 1. **Pela API**, pra validar se um `quadra_id` recebido no `POST /replay/{id}`
    é conhecido (404 se não estiver na lista).
@@ -120,6 +121,13 @@ Esse arquivo é usado em dois lugares:
    automaticamente um `.env` por câmera em `/etc/replay-system/cameras/`
    — é esse `.env` que o unit systemd `replay-capture@.service` usa pra
    saber o RTSP daquela câmera.
+3. **Por `db/migrate_cameras.py`** (PT-10), que sincroniza `Local`/`Esporte`/
+   `Quadra` no banco a partir deste arquivo — roda automaticamente (idempotente)
+   toda vez que a API sobe. `esporte` é obrigatório pra isso; entradas sem
+   esse campo caem no esporte `"indefinido"`. `Local.nome` hoje é só derivado
+   de `local_id` (capitalizado) — não tem outro nome/observação na fonte;
+   gerenciamento de locais/esportes via API está no ciclo seguinte (ver
+   `PLANO_DE_ACAO.md`).
 
 Fluxo pra adicionar/trocar uma câmera:
 
@@ -204,9 +212,13 @@ razoável pra dev local:
 > por `db/engine.py`, não por `api/config.py` — mesmo padrão que
 > `capture_camera.sh` já usa (cada módulo se configura sozinho), porque o
 > futuro worker assíncrono de logo (não é a API) também vai precisar da
-> camada de persistência. Default: `sqlite:///.data/repet.db`. Ainda não é
-> usada por `api/main.py` (isso é PT-02, ver `PLANEJAMENTO.md`) — hoje só
-> existe a base (`db/`), sem nada gravando nela em produção.
+> camada de persistência. Default: `sqlite:///.data/repet.db`. **Desde
+> 2026-09-17 (PT-02) a API já grava um `Replay` no banco a cada acionamento
+> bem-sucedido** — best-effort: se a gravação falhar, o replay já gerado em
+> disco continua sendo entregue normalmente (disco é a fonte de verdade
+> final, RNF6; só um aviso vai pro log). No startup, a API também roda
+> `create_db_and_tables()` e sincroniza `Local`/`Esporte`/`Quadra` a partir
+> de `cameras.json` (PT-10, ver seção acima).
 
 > **Nota sobre buffer travado:** se a câmera travar/desconectar mas o
 > processo de captura continuar rodando (não crasha, só para de receber
@@ -263,12 +275,13 @@ clipper/
   clip_generator.py     -> Corte dos últimos N segundos, com proteção contra
                             o segmento ainda sendo escrito (race condition)
 db/
-  engine.py             -> Engine SQLite (modo WAL) + sessão (PT-01, ver
-                            PLANEJAMENTO.md). Ainda não é usado por api/main.py
-                            (isso é PT-02) — só a base de persistência por
-                            enquanto.
-  models.py             -> Modelo Replay (índice composto quadra_id+criado_em).
-                            Local/Esporte/Quadra/Logo entram em PT-10/PT-14.
+  engine.py             -> Engine SQLite (modo WAL) + sessão (PT-01)
+  models.py             -> Local, Esporte, Quadra (PT-10) e Replay (PT-01),
+                            com índice composto quadra_id+criado_em. Logo
+                            entra em PT-14.
+  migrate_cameras.py    -> Sincroniza Local/Esporte/Quadra a partir de
+                            config/cameras.json (PT-10), idempotente, chamado
+                            no startup da API (main.py)
 config/
   cameras.json          -> Registro central de câmeras (fonte única de verdade;
                             gitignored — tem credencial real, nunca commitado)
@@ -321,12 +334,15 @@ de sistema em vez do loop do `start.sh`).
 
 ## Como testar localmente (sem câmera real, sem hardware)
 
-**Teste 0 — camada de persistência (`db/`), sem câmera/API nenhuma:**
+**Teste 0 — camada de persistência (`db/`) e migração de câmeras, sem
+câmera/API nenhuma:**
 ```bash
 python -m pytest test/test_db.py -v
 ```
 Roda com `python -m pytest` (não `pytest` puro) — precisa do diretório raiz
 do repo no `sys.path` pra importar `db.models`, e `python -m` garante isso.
+Cobre: criação de tabela/índice, integridade referencial (Replay exige
+Quadra existente), e a sincronização idempotente de `db/migrate_cameras.py`.
 
 Nenhum dos dois testes abaixo precisa de câmera de verdade — ambos usam uma
 fonte sintética (`ffmpeg testsrc`) no lugar do RTSP. Já rodei os dois aqui;
@@ -343,8 +359,10 @@ bash test/run_pipeline_test.sh
 bash test/run_api_test.sh
 ```
 Esse cobre: quadra desconhecida (404), trigger válido (200 + clipe
-gerado), download do clipe pela URL pública retornada, e validação do
-arquivo com `ffprobe`.
+gerado), download do clipe pela URL pública retornada, validação do
+arquivo com `ffprobe`, e (desde PT-10/PT-02) que o replay foi registrado
+no banco e que a quadra foi migrada de `cameras.json` corretamente — em
+banco isolado (`$WORKDIR/repet_test.db`), não no `.data/repet.db` de dev.
 
 ## Rodando a API em produção
 
@@ -431,8 +449,12 @@ acelerar esse reencode de jeito nenhum, nem encaixando uma GPU dedicada
    validado com devkit **ESP8266** de bring-up. Falta comprar/testar o
    devkit **ESP32 + módulo Ethernet W5500** definitivo e replicar pros
    demais botões/locais.
-5. ⬜ Persistência em Postgres da tabela `Replay` (hoje o corte só grava o
-   arquivo; não há registro em banco ainda).
+5. ✅ Persistência em SQLite (`db/`, ver `PLANEJAMENTO.md`/`PLANO_DE_ACAO.md`
+   — decisão revisada de Postgres pra SQLite em 2026-09-17): modelos
+   `Local`/`Esporte`/`Quadra` migrados de `cameras.json` (PT-10) e `Replay`
+   registrado a cada acionamento (PT-02). Falta: endpoints `/api/...` que
+   exponham isso (M5-M8, D4-D6), worker assíncrono de logo (S1) e a própria
+   tabela `Logo` (PT-14).
 6. ⬜ API de gerenciamento (`/admin`, protegida por HTTP Basic no MVP) —
    só endpoints JSON, sem página web (ver nota de escopo no topo do
    README). Frontend/painel que consumir essa API é de outro projeto.

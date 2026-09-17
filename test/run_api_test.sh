@@ -15,6 +15,7 @@ WORKDIR="/tmp/replay-api-test"
 export BUFFER_ROOT="${WORKDIR}/buffer"
 export OUTPUT_DIR="${WORKDIR}/output"
 export CAMERAS_FILE="${ROOT}/config/cameras.json"
+export DATABASE_URL="sqlite:///${WORKDIR}/repet_test.db"
 export CLIP_DURATION_SECONDS=35
 export SEGMENT_TIME=2
 
@@ -64,5 +65,19 @@ ffprobe -v error -select_streams v:0 \
 
 echo "== 8) Arquivo final também está salvo em disco persistente aqui: =="
 ls -la "$OUTPUT_DIR"
+
+echo "== 9) Validando que o replay foi registrado no banco (PT-02) =="
+REPLAY_ID=$(basename "$CLIP_URL" .mp4)
+sqlite3 "${WORKDIR}/repet_test.db" \
+    "SELECT id, quadra_id, estado, duracao_segundos, tamanho_bytes FROM replay WHERE id = '${REPLAY_ID}';"
+COUNT=$(sqlite3 "${WORKDIR}/repet_test.db" "SELECT COUNT(*) FROM replay WHERE id = '${REPLAY_ID}';")
+if [[ "$COUNT" != "1" ]]; then
+    echo "FALHOU: replay '${REPLAY_ID}' não encontrado no banco (esperado 1 linha, achou ${COUNT})" >&2
+    exit 1
+fi
+
+echo "== 10) Validando que a quadra foi migrada de cameras.json pro banco (PT-10) =="
+sqlite3 "${WORKDIR}/repet_test.db" \
+    "SELECT q.id, q.nome, q.esporte_id, l.nome FROM quadra q JOIN local l ON l.id = q.local_id WHERE q.id = '${QUADRA_ID}';"
 
 echo "== OK: endpoint testado de ponta a ponta =="

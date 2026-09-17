@@ -18,24 +18,31 @@ from collections.abc import Generator
 from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///.data/repet.db")
 
-_is_sqlite = DATABASE_URL.startswith("sqlite")
+def create_sqlite_engine(database_url: str):
+    """Cria um engine SQLite com WAL + foreign_keys habilitados. Usado tanto
+    pelo engine principal do módulo quanto pelos testes — pra que os testes
+    validem o mesmo comportamento de integridade referencial/índices que a
+    aplicação real tem, em vez de um engine "cru" sem os PRAGMAs."""
+    eng = create_engine(database_url, connect_args={"check_same_thread": False})
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if _is_sqlite else {},
-)
-
-
-if _is_sqlite:
-
-    @event.listens_for(engine, "connect")
+    @event.listens_for(eng, "connect")
     def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
+
+    return eng
+
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///.data/repet.db")
+
+engine = (
+    create_sqlite_engine(DATABASE_URL)
+    if DATABASE_URL.startswith("sqlite")
+    else create_engine(DATABASE_URL)
+)
 
 
 def create_db_and_tables() -> None:

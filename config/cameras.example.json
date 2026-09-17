@@ -2,18 +2,21 @@
   {
     "quadra_id": "loc1-quadra1",
     "local_id": "loc1",
+    "esporte": "futsal",
     "nome": "Quadra 1",
     "input_url": "rtsp://user:senha@10.0.1.11:554/stream1"
   },
   {
     "quadra_id": "loc1-quadra2",
     "local_id": "loc1",
+    "esporte": "futsal",
     "nome": "Quadra 2",
     "input_url": "rtsp://user:senha@10.0.1.12:554/stream1"
   },
   {
     "quadra_id": "loc2-quadra1",
     "local_id": "loc2",
+    "esporte": "beach tennis",
     "nome": "Quadra 1",
     "input_url": "rtsp://user:senha@10.0.2.11:554/stream1"
   }

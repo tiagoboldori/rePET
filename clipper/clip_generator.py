@@ -114,6 +114,25 @@ def _run(cmd: list[str]) -> None:
         )
 
 
+def probe_duration_seconds(path: Path) -> float:
+    """Duração real (segundos) de um clipe já gerado, via ffprobe. Usado
+    pelo registro no banco (PT-02) — com `-c copy` o corte cai no keyframe
+    mais próximo, então a duração real pode ser um pouco maior que
+    `duration_seconds` pedido (ver nota no README), não exatamente igual."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise ClipGenerationError(f"ffprobe falhou pra {path}:\n{result.stderr}")
+    return float(result.stdout.strip())
+
+
 def generate_clip(
     quadra_id: str,
     buffer_root: Path,
