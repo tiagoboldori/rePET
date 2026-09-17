@@ -195,10 +195,10 @@ quadra, sem variação por esporte ou campanha.
 
 | Item | Situação |
 |---|---|
-| Gerenciamento de câmeras via API (criar, alterar, remover) | **Deslocado para o ciclo seguinte** em razão da promoção da logo. Ver seção 8. |
-| Endpoint de saúde e defasagem por câmera | **Deslocado para o ciclo seguinte.** Ver seção 8. |
-| Listagem de replays entre quadras, com filtros | **Deslocado para o ciclo seguinte.** |
-| Gerenciamento de locais e esportes via API | **Deslocado para o ciclo seguinte.** As entidades são criadas em M2; apenas a manutenção via API fica adiada, permanecendo por carga inicial. |
+| Gerenciamento de câmeras via API (criar, alterar, remover) | **Promovido de volta ao ciclo em 17/09/2026 — Opção B (seção 8).** Agendado como PT-16, ver `PLANEJAMENTO.md` seção 4 (extensão D11-D13). |
+| Endpoint de saúde e defasagem por câmera | **Promovido de volta ao ciclo — Opção B.** Agendado como PT-17. |
+| Listagem de replays entre quadras, com filtros | **Promovido de volta ao ciclo — Opção B.** Agendado como PT-18. |
+| Gerenciamento de locais e esportes via API | **Deslocado para o ciclo seguinte.** As entidades são criadas em M2; apenas a manutenção via API fica adiada, permanecendo por carga inicial. Não faz parte do pacote reincorporado pela Opção B. |
 | Qualquer interface web de administração | Fora do escopo do projeto por definição. |
 | Migração para PostgreSQL | Adiada conforme a seção 4, por gatilho e não por calendário. |
 | Aceleração de vídeo em hardware | Depende do servidor central, ainda não definido. Deixou de ser pré-requisito com a arquitetura da seção 6. |
@@ -227,10 +227,15 @@ Há duas opções, e a escolha é do responsável pelo projeto:
 
 | Opção | Efeito |
 |---|---|
-| **A — recomendada.** Manter a janela de dez dias úteis e deslocar os três pacotes. | Logo entregue no ciclo. Monitoramento de câmeras permanece manual por mais um ciclo. |
-| **B.** Estender o ciclo em aproximadamente três dias úteis, até 05/10. | Logo entregue e monitoramento preservado, ao custo de atraso no encerramento do ciclo. |
+| A. Manter a janela de dez dias úteis e deslocar os três pacotes. | Logo entregue no ciclo. Monitoramento de câmeras permanece manual por mais um ciclo. |
+| **B — escolhida pelo responsável em 17/09/2026.** Estender o ciclo até 05/10. | Logo entregue e monitoramento preservado, ao custo de atraso no encerramento do ciclo. |
 
-O planejamento em `PLANEJAMENTO.md` está construído sobre a opção A.
+O planejamento em `PLANEJAMENTO.md` está construído sobre a opção B: os três
+pacotes deslocados (seção 7.4) voltam ao ciclo como PT-16, PT-17 e PT-18, em
+três dias úteis adicionais (D11-D13, 01/10 a 05/10). A estimativa de ~21 h
+para os três pacotes excede em ~3 h a capacidade nominal dos três dias
+(18 h); ver nota de risco na seção 4 do `PLANEJAMENTO.md` — o pacote PT-18
+(menor prioridade dos três) absorve essa folga negativa.
 
 ---
 
@@ -287,23 +292,30 @@ O planejamento em `PLANEJAMENTO.md` está construído sobre a opção A.
 |---|---|---|
 | Custo de CPU do reencode em servidor sem aceleração de hardware | Fila acumulada em horário de pico | Fila serializada e preset `ultrafast`; aceleração por hardware como otimização posterior |
 | Câmera nova entregando HEVC em vez de H.264 | Clipe com problema de reprodução | Verificação com `ffprobe` no RTSP durante o cadastro |
-| Ordem de precedência entre esporte e local divergir da intenção comercial | Logo errada aplicada de forma sistemática | Confirmar a ordem antes da implementação de M10 |
-| Monitoramento de câmeras adiado | Câmera travada descoberta somente no acionamento | Verificação manual periódica até o ciclo seguinte |
+| ~~Ordem de precedência entre esporte e local divergir da intenção comercial~~ | Logo errada aplicada de forma sistemática | **Resolvido em 17/09/2026:** ordem mantida como documentada na seção 5.1 (esporte acima de local) |
+| ~~Monitoramento de câmeras adiado~~ | Câmera travada descoberta somente no acionamento | **Resolvido pela Opção B (17/09/2026):** PT-17 traz o endpoint de saúde de volta pro próprio ciclo (D11-D13), não fica mais adiado |
 | Banda do *backbone* da intranet | Perda de segmentos | Pendente de confirmação junto à infraestrutura |
-| Política de retenção indefinida | Acervo cresce sem limite, e o arquivo bruto duplica o consumo | C4 permanece bloqueado até a definição do prazo |
+| ~~Política de retenção indefinida~~ | Acervo cresce sem limite, e o arquivo bruto duplica o consumo | **Resolvido em 17/09/2026: 14 dias.** C4 pode ser implementado |
 | Ponto único de falha no servidor central | Indisponibilidade simultânea nos quatro locais | Risco aceito na decisão de arquitetura |
 
 ---
 
-## 12. Decisões pendentes que condicionam este plano
+## 12. Decisões que condicionavam este plano — todas resolvidas em 17/09/2026
 
-1. Ordem de precedência entre esporte e local na resolução da logo
-   (condiciona M10).
-2. Se um replay ainda sem logo pode ser exibido publicamente durante o
-   processamento, ou se deve permanecer oculto até estar marcado.
-3. Quais escopos de logo existem de fato no negócio, além dos quatro
-   previstos — em particular, se haverá logo por campanha ou por período.
-4. Política de retenção dos replays públicos e do arquivo bruto (bloqueia C4).
-5. Hardware do servidor central, que deixa de bloquear a logo mas define o
-   tempo de fila.
-6. Escolha entre as opções A e B da seção 8.
+1. ~~Ordem de precedência entre esporte e local na resolução da logo~~ —
+   **mantida como documentada na seção 5.1** (`quadra → esporte → local →
+   global`, esporte acima de local). Libera a implementação de M10.
+2. ~~Replay sem logo pode ser exibido publicamente durante o
+   processamento?~~ — **sim.** Fica público imediatamente no estado bruto;
+   o arquivo marcado passa a ser preferido assim que o worker (S1) concluir.
+3. ~~Quais escopos de logo existem de fato no negócio?~~ — **esporte,
+   local e quadra** (mais o global já previsto). Sem escopo por campanha ou
+   período por enquanto.
+4. ~~Política de retenção dos replays públicos e do arquivo bruto~~ —
+   **14 dias.** Libera a implementação de C4.
+5. Hardware do servidor central — **sem previsão de mudança** ("até segunda
+   ordem"). Não bloqueia mais a logo (arquitetura assíncrona, seção 6); só
+   define o tempo de fila do worker.
+6. ~~Escolha entre as opções A e B da seção 8~~ — **Opção B.**
+
+Nenhuma decisão pendente bloqueia o início do desenvolvimento.
