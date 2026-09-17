@@ -136,6 +136,25 @@ Você NUNCA edita os `.env` de `/etc/replay-system/cameras/` diretamente à
 mão em produção — eles são gerados a partir do `cameras.json`. Isso evita
 a câmera ficar configurada em dois lugares que podem divergir.
 
+### Câmera de produção
+
+**Definida em 2026-09-17: HiLook H.265+.** As câmeras usadas nos testes até
+aqui (`.63`/`.86`, Dahua/OEM) foram só por conveniência — não são o hardware
+final, não estão de fato apontadas pra uma quadra.
+
+Checklist ao configurar uma câmera HiLook real:
+- **Trocar o codec de vídeo pra H.264** na aba de vídeo da própria câmera —
+  "H.265+" é só o padrão de fábrica da linha, não uma trava; a câmera deixa
+  escolher H.264/H.265/H.265+ por stream. Isso é pré-requisito: todo o
+  pipeline de corte hoje depende de `-c copy` (sem reencode), que só
+  funciona porque a câmera entrega H.264 nativo (ver nota em "Endpoint da
+  API" acima) — em HEVC o clipe final volta a ter problema de reprodução.
+- Validar com `ffprobe` no RTSP depois de configurar (`codec_name=h264`),
+  não confiar só na configuração salva na interface web.
+- HiLook/Hikvision têm uma função nativa de logo (**Picture Overlay**,
+  `Configuration > Image > Picture Overlay`) — ver seção "Funcionalidades
+  futuras" abaixo pra detalhes e limitações.
+
 ## Endpoint da API
 
 ```
@@ -177,7 +196,7 @@ razoável pra dev local:
 | `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras conhecidas |
 | `CLIP_DURATION_SECONDS` | `35` | Duração do clipe cortado |
 | `SEGMENT_TIME` | `2` | Precisa bater com o valor usado por `capture_camera.sh` |
-| `SAFETY_MARGIN` | `2.0` | Margem (segundos) pra considerar um segmento "fechado" |
+| `SAFETY_MARGIN` | `0.5` | Margem (segundos) pra considerar um segmento "fechado" |
 | `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~13s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
 | `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo entre dois acionamentos da MESMA quadra — uma segunda chamada antes disso recebe `429` em vez de disparar outro corte |
 
@@ -286,7 +305,8 @@ de sistema em vez do loop do `start.sh`).
 
 Nenhum dos dois testes abaixo precisa de câmera de verdade — ambos usam uma
 fonte sintética (`ffmpeg testsrc`) no lugar do RTSP. Já rodei os dois aqui;
-ambos passaram (clipe final de 45.000000s, H264, servido corretamente).
+ambos passaram (clipe final de `CLIP_DURATION_SECONDS`s, H264, servido
+corretamente).
 
 **Teste 1 — só a lógica de captura + corte (sem subir a API):**
 ```bash
@@ -312,6 +332,67 @@ uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 (Em produção, isso também vira um unit systemd — ainda não incluído aqui,
 mesmo padrão do `replay-capture@.service`.)
+
+## Funcionalidades futuras (planejadas via API de gerenciamento, não implementadas)
+
+Discutido em 2026-09-17 — registrado aqui só como contexto pra quando
+entrar em desenvolvimento de verdade, nada disso existe no código ainda.
+
+**Logo/marca d'água queimada no clipe.** Decidido: precisa estar queimada
+no arquivo (vale pra qualquer download, não só pra quem vê pelo site) —
+não dá pra ser só um overlay client-side no player.
+- Implicação: reverte a otimização `-c copy` pro clipe que levar logo —
+  overlay exige decodificar+recodificar o vídeo inteiro (limitação de
+  qualquer codec preditivo tipo H.264, não é limitação do ffmpeg
+  especificamente).
+- Preset decidido pra quando isso for implementado: `ultrafast` do
+  libx264. Avaliado e descartado: forçar `profile=baseline` (o `ultrafast`
+  já desliga B-frames/CABAC/multi-ref por conta própria, ganho adicional
+  seria marginal); trocar de codec por VP9/AV1 (mais pesados de codificar
+  que H.264, na direção errada); MJPEG intra-only (mais rápido de
+  codificar, mas arquivo final bem maior — ruim pra servir publicamente).
+- Alavanca real pra baixar o custo: **aceleração de hardware de vídeo**
+  (Intel Quick Sync via VAAPI, ou NVENC/NVDEC da Nvidia) — decode+overlay+
+  encode rodando num bloco de silício dedicado em vez da CPU de uso geral.
+  Estimativa: cai de ~1000-1200% CPU pra CPU de um dígito só, recuperando
+  quase todo o ganho do `-c copy` mesmo com logo queimada. Isso eleva a
+  escolha de hardware do servidor central (ver seção abaixo) de
+  preferência pra pré-requisito.
+- **Alternativa nativa da câmera (HiLook/Hikvision):** existe uma função
+  de fábrica, **Picture Overlay** (`Configuration > Image > Picture
+  Overlay`), que sobrepõe uma imagem direto no ISP da câmera antes do
+  encode — sairia "de graça" (zero custo de servidor), mesma lógica de
+  como NVRs comerciais queimam OSD. Limitações confirmadas na
+  documentação oficial: imagem precisa ser **BMP 24-bit, máximo
+  128×128px** (dá pra um badge pequeno, não um banner); sem confirmação de
+  suporte a transparência (BMP 24-bit não tem alpha nativo). **Não
+  confirmado ainda** se fica realmente queimado em todo stream (RTSP/
+  gravação) ou só na visualização — validar na prática antes de confiar
+  em produção. Automação via API (ISAPI) **não confirmada**: o guia
+  oficial documenta OSD de texto via API, mas não achamos endpoint
+  documentado pra Picture Overlay — precisaria capturar a requisição real
+  via DevTools do navegador numa câmera física pra confirmar. É uma logo
+  fixa (não dá pra trocar por clipe/evento).
+
+**Música/trilha de áudio.** Barato: não exige tocar no vídeo (`-c:v copy`
+continua valendo), só o áudio é (re)codificado — custo de CPU desprezível,
+compatível com a otimização atual do trim.
+
+### Servidor central (hardware — ainda em aberto)
+
+Ainda não decidido entre **Mini PC/NUC** e **Raspberry Pi 5 8GB** como
+compute único do backend central (ver decisão de arquitetura "backend
+central único" acima).
+
+A balança pesa mais pra NUC (com Intel Quick Sync, se o modelo tiver)
+desde 2026-09-17: a feature de logo queimado (acima) precisa de
+aceleração de hardware de vídeo pra não pesar demais na CPU, e — pelo que
+se sabe, **ainda não confirmado na especificação oficial** — o Raspberry
+Pi 5 removeu o encoder de vídeo em hardware que modelos anteriores tinham
+(mantém só decode acelerado). Se confirmado, o RPi5 não teria como
+acelerar esse reencode de jeito nenhum, nem encaixando uma GPU dedicada
+(sem slot PCIe de verdade). Não testável na VM de desenvolvimento atual
+(Hyper-V sem GPU passada) — só validável com o hardware real escolhido.
 
 ## Próximos passos
 
