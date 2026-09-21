@@ -323,6 +323,64 @@ def test_process_pending_stays_pendente_on_server_error(tmp_path):
         assert replay.lara_status == ReplayLaraStatus.PENDENTE  # retentável — próxima passada tenta de novo
 
 
+def test_process_pending_applies_exponential_backoff_and_skips_before_it_elapses(tmp_path):
+    """Prompt do Lara: 'retente com backoff', especificamente pro 429 —
+    sem isso, uma indisponibilidade prolongada bateria no Lara a cada
+    passada da fila pra cada replay pendente."""
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        _seed_pending_replay(session, output_dir)
+
+        client = _FakeLaraClientForSync()
+        client._upload_exception = LaraRateLimitError("429 do Lara")
+
+        upload_queue.process_pending(session, client, output_dir)
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.PENDENTE
+        assert replay.lara_tentativas == 1
+        assert replay.lara_proxima_tentativa_em > datetime.now()
+        primeira_proxima_tentativa = replay.lara_proxima_tentativa_em
+
+        # Antes do backoff passar, uma nova passada da fila não tenta de novo.
+        upload_queue.process_pending(session, client, output_dir)
+        assert len(client.upload_calls) == 1  # não subiu
+
+        # Simula o backoff já ter passado — a próxima passada tenta de novo
+        # e, ao falhar outra vez, dobra o atraso.
+        replay.lara_proxima_tentativa_em = datetime.now()
+        session.add(replay)
+        session.commit()
+        upload_queue.process_pending(session, client, output_dir)
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert len(client.upload_calls) == 2
+        assert replay.lara_tentativas == 2
+        segundo_atraso = (replay.lara_proxima_tentativa_em - datetime.now()).total_seconds()
+        primeiro_atraso = (primeira_proxima_tentativa - datetime.now()).total_seconds()
+        assert segundo_atraso > primeiro_atraso  # backoff cresceu
+
+
+def test_process_pending_resets_backoff_on_success(tmp_path):
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        replay = _seed_pending_replay(session, output_dir)
+        replay.lara_tentativas = 3
+        replay.lara_proxima_tentativa_em = datetime.now()
+        session.add(replay)
+        session.commit()
+
+        client = _FakeLaraClientForSync()
+        upload_queue.process_pending(session, client, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.ENVIADO
+        assert replay.lara_tentativas == 0
+        assert replay.lara_proxima_tentativa_em is None
+
+
 # --- heartbeat: falha não propaga ------------------------------------------
 
 

@@ -386,16 +386,26 @@ primeiras — são endereço/credencial de outro sistema):
 | `REPLAY_API_TOKEN` | sim, pra ligar a integração | Token pessoal Sanctum, gerado por `php artisan replay:token` do lado do Lara |
 | `OVERLAY_CACHE_DIR` | não (default `/var/replay/overlays`) | Onde os overlays baixados ficam em cache local |
 | `LARA_POLL_INTERVAL_SECONDS` | não (default `120`) | Intervalo entre pulls de `GET /cameras` e heartbeats |
-| `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | não (default `10`) | Intervalo entre passadas da fila de envio de clipes |
+| `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | não (default `10`) | Intervalo entre passadas da fila de envio de clipes — só afeta a LATÊNCIA de detectar um replay novo pendente, não o ritmo de retentativa de um que já falhou (ver backoff abaixo) |
 | `LOCAL_RAW_RETENTION_DAYS` | não (default `3`, a confirmar) | Retenção do arquivo local, usado só pela página de teste `/quadra/{id}` — não é a entrega ao sócio (essa é do Lara, 7 dias) |
 
 Sem `LARA_BASE_URL`/`REPLAY_API_TOKEN` definidos, `./start.sh` não sobe o
 worker do Lara e avisa — o resto do sistema (captura, corte, página
-pública) continua funcionando normalmente. Diagnóstico manual:
+pública) continua funcionando normalmente. Diagnóstico manual (chama
+`/ping` e `/cameras` ao vivo e compara com o cache local):
 
 ```bash
 python -m scripts.lara_diagnostic
 ```
+
+**Backoff da fila de envio (RNF4):** uma falha transitória (401/403/404/
+429/5xx/rede) não retenta a cada passada da fila — cada replay pendente
+tem seu próprio atraso exponencial (`lara_tentativas`/
+`lara_proxima_tentativa_em` em `Replay`, `integrations/upload_queue.py`):
+10s, 20s, 40s... até um teto de 10min, zerado em sucesso ou falha
+definitiva (422/413). Sem isso, uma indisponibilidade prolongada do Lara
+bateria nele a cada `LARA_UPLOAD_POLL_INTERVAL_SECONDS` pra cada replay
+pendente.
 
 ## Como rodar (jeito rápido)
 

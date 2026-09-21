@@ -77,6 +77,12 @@ class Replay(SQLModel, table=True):
     lara_enviado_em: datetime | None = Field(default=None)
     lara_ultimo_erro: str | None = Field(default=None)
 
+    # Backoff exponencial por item (prompt do Lara: "retente com backoff";
+    # "429 -> backoff") — zerado em sucesso ou falha definitiva,
+    # incrementado a cada falha transitória (ver integrations/upload_queue.py).
+    lara_tentativas: int = Field(default=0)
+    lara_proxima_tentativa_em: datetime | None = Field(default=None)
+
     __table_args__ = (
         Index("ix_replay_quadra_id_criado_em", "quadra_id", "criado_em"),
     )
