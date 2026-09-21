@@ -1,0 +1,16 @@
+[Unit]
+Description=Limpeza do buffer bruto do rePET (retenção fixa de 2min, tmpfs)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/replay-system/replay-system.env
+WorkingDirectory=/opt/replay-system
+ExecStart=/opt/replay-system/scripts/cleanup_loop.sh ${BUFFER_ROOT} 2 30
+Restart=always
+RestartSec=5
+User=replay
+Group=replay
+
+[Install]
+WantedBy=multi-user.target

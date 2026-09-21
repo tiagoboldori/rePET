@@ -1,0 +1,16 @@
+[Unit]
+Description=Retenção local dos clipes finais do rePET (S3 — não é a entrega ao sócio, essa é do Lara)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/replay-system/replay-system.env
+WorkingDirectory=/opt/replay-system
+ExecStart=/opt/replay-system/.venv/bin/python -m scripts.local_retention_loop
+Restart=always
+RestartSec=5
+User=replay
+Group=replay
+
+[Install]
+WantedBy=multi-user.target

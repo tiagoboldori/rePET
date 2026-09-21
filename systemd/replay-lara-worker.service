@@ -1,0 +1,17 @@
+[Unit]
+Description=Worker de integração com o Lara do rePET (sync/upload/heartbeat)
+After=network-online.target replay-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/replay-system/replay-system.env
+WorkingDirectory=/opt/replay-system
+ExecStart=/opt/replay-system/.venv/bin/python -m scripts.lara_worker
+Restart=always
+RestartSec=5
+User=replay
+Group=replay
+
+[Install]
+WantedBy=multi-user.target

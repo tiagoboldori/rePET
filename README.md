@@ -80,7 +80,7 @@ variável de ambiente (ver `api/config.py`):
 | | Variável | Default | O que tem | Ciclo de vida |
 |---|---|---|---|---|
 | **Buffer bruto** | `BUFFER_ROOT` | `/var/replay` | Segmentos de 2s contínuos, um subdiretório por `quadra_id` (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) | Descartável — retenção fixa de **2 minutos**, nada mais (`scripts/cleanup_segments.sh`, default `max_age_min=2`). Em produção fica em **tmpfs** (RAM), não em disco. |
-| **Clipes finais** | `OUTPUT_DIR` | `/var/replay/output` | Um arquivo por evento de replay: `<quadra_id>_<timestamp>.mp4` | Persistente, em disco de verdade. Retenção pública ainda é um placeholder (ver "Decisões pendentes" no contexto do projeto). |
+| **Clipes finais** | `OUTPUT_DIR` | `/var/replay/output` | Um arquivo por evento de replay: `<quadra_id>_<timestamp>.mp4` (e `<...>_overlay.mp4` quando o worker do Lara já aplicou a logo) | Persistente, em disco de verdade. Retenção local de `LOCAL_RAW_RETENTION_DAYS` dias (default 3, `scripts/local_retention_loop.py`, checa a cada 1h) — **não é a entrega oficial ao sócio** (essa é do Lara, 7 dias); é só pra essa página de teste interna e pros endpoints `/api/replays/...` não crescerem sem limite. |
 
 O `OUTPUT_DIR` é montado pela API em `/clips` (via `StaticFiles`), então
 todo clipe final já sai acessível publicamente em:
@@ -330,6 +330,11 @@ db/
   migrate_cameras.py    -> Sincroniza Local/Esporte/Quadra a partir de
                             config/cameras.json (PT-10), idempotente, chamado
                             no startup da API (main.py)
+  reconcile.py          -> Insere no banco os Replay ausentes por comparação
+                            com o disco (PT-03), chamado no startup da API
+  local_retention.py    -> Apaga (arquivo + registro) Replay mais velho que
+                            LOCAL_RAW_RETENTION_DAYS (S3, não é a entrega ao
+                            sócio — essa é do Lara)
 integrations/
   lara_client.py         -> Cliente HTTP da API do Lara (/ping, /cameras,
                             heartbeat, upload de vídeo) — mapeia cada status
@@ -346,26 +351,40 @@ config/
                             gitignored — tem credencial real, nunca commitado)
   cameras.example.json  -> Template commitado, copiar pra cameras.json
 systemd/
-  replay-capture@.service   -> Unit template (1 instância por câmera)
-  env-examples/              -> Exemplo de .env por câmera
+  replay-capture@.service          -> Unit template (1 instância por câmera)
+  replay-api.service               -> Unit da API
+  replay-buffer-cleanup.service    -> Unit da limpeza do buffer
+  replay-local-retention.service   -> Unit da retenção local dos clipes finais
+  replay-lara-worker.service       -> Unit do worker do Lara
+  env-examples/                     -> replay-system.env.example (compartilhado
+                                        pelos units acima, exceto captura) e um
+                                        .env por câmera
 scripts/
   generate_camera_envs.py   -> Gera os .env de systemd a partir de cameras.json
   cleanup_segments.sh       -> Um passe de limpeza do buffer (retenção: últimos 2min)
   cleanup_loop.sh           -> Roda cleanup_segments.sh em loop (usado pelo start.sh
                                 enquanto o cron real de produção não existe)
+  local_retention_loop.py   -> Roda db/local_retention.py em loop (a cada 1h)
+  ensure_services.sh        -> Sobe/confere API, captura, limpezas e worker do
+                                Lara — chamado por start.sh e por watchdog_loop.sh
+  watchdog_loop.sh           -> Chama ensure_services.sh a cada 30s, sem rodar
+                                testes de novo — supervisão contínua sem systemd
   lara_worker.py            -> Processo com as 3 rotinas de fundo da integração
                                 com o Lara: sync de config, fila de envio, heartbeat
-  lara_diagnostic.py        -> Chama /ping e mostra a config em cache por câmera
+  lara_diagnostic.py        -> Chama /ping e /cameras (ao vivo) e mostra, por
+                                câmera, se o cache local está sincronizado
 test/
   test_db.py               -> pytest: camada de persistência (db/) — criação de
                                 tabela, índice e round-trip de insert/consulta
+  test_reconcile.py        -> pytest: reconciliação disco->banco (PT-03)
+  test_local_retention.py  -> pytest: retenção local dos clipes finais (S3)
   test_lara_integration.py -> pytest: cliente do Lara (mapeamento de erro),
-                                cache por config_hash, fila de envio, overlay
+                                cache por config_hash, fila de envio (com backoff),
+                                overlay
   run_pipeline_test.sh     -> Testa capture + clipper direto (sem API, sem câmera real)
   run_api_test.sh          -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
-start.sh                  -> Sobe venv/deps, roda os testes padrão, a API, a captura de
-                              cada câmera, a limpeza do buffer e o worker do Lara
-                              (se LARA_BASE_URL/REPLAY_API_TOKEN estiverem definidos)
+start.sh                  -> Sobe venv/deps, carrega .env, roda os testes padrão e
+                              chama ensure_services.sh + watchdog_loop.sh
 ```
 
 ## Integração com o Lara (PT-14/PT-15)
@@ -430,25 +449,47 @@ pendente.
 Faz tudo de uma vez: cria/atualiza o venv (`.venv/`), confere `ffmpeg`,
 roda os testes padrão abaixo — `pytest test/` (camada de persistência) e os
 dois testes de shell (com log em `logs/test_*.log` e feedback
-`[OK]`/`[FALHOU]` no terminal) — e, por fim, garante que a API, a
-captura de cada câmera de `config/cameras.json` **e a limpeza do buffer**
-estejam no ar — sem subir duplicata se já estiverem rodando (checa PID em
-`run/*.pid`). No final imprime as URLs úteis (`/health`, `/quadra/<id>`
-de cada câmera).
+`[OK]`/`[FALHOU]` no terminal) — e, por fim, garante que os serviços
+abaixo estejam no ar (via `scripts/ensure_services.sh`, chamado por ele),
+sem subir duplicata do que já estiver rodando (checa PID em `run/*.pid`).
+No final imprime as URLs úteis (`/health`, `/quadra/<id>` de cada câmera).
 
-A limpeza (`scripts/cleanup_loop.sh`) roda `cleanup_segments.sh` a cada
-30s, mantendo só os **últimos 2 minutos** de buffer bruto — o resto é
-apagado. Isso vale tanto pra segmentos antigos que já estavam acumulados
-quanto pros novos que forem chegando; não depende de cron do sistema
-estar instalado.
+| Serviço | Script | O que faz |
+|---|---|---|
+| API | `uvicorn api.main:app` | porta 8000 |
+| Captura | `capture/capture_camera.sh` (1 por câmera) | buffer contínuo em `BUFFER_ROOT` |
+| Limpeza do buffer | `scripts/cleanup_loop.sh` | mantém só os **últimos 2 minutos** de buffer bruto (`cleanup_segments.sh` a cada 30s) |
+| Retenção local | `scripts/local_retention_loop.py` | apaga clipe+registro mais velhos que `LOCAL_RAW_RETENTION_DAYS` (checa a cada 1h) — sempre sobe, não depende do Lara |
+| Worker do Lara | `scripts/lara_worker.py` | só sobe se `LARA_BASE_URL`/`REPLAY_API_TOKEN` estiverem configurados (`.env` ou ambiente) |
 
-Pra parar um serviço subido por ele: `kill $(cat run/api.pid)` (ou o
-`run/capture_<quadra_id>.pid` / `run/cleanup.pid` correspondente).
+Nenhum desses depende de cron/systemd do sistema pra funcionar (loop
+próprio em cada um).
 
-Isso é um jeito manual de "subir tudo" pra essa fase de desenvolvimento —
-**não substitui** os units systemd (produção real ainda depende do que
-está pendente em "Próximos passos": unit da própria API, tmpfs, cron real
-de sistema em vez do loop do `start.sh`).
+Pra parar um serviço: `kill $(cat run/api.pid)` (ou o
+`run/capture_<quadra_id>.pid` / `run/cleanup.pid` / `run/local_retention.pid`
+/ `run/lara_worker.pid` / `run/watchdog.pid` correspondente) — mas o
+watchdog abaixo sobe ele de novo na próxima checagem, a não ser que você
+pare o watchdog também.
+
+### Watchdog (supervisão contínua)
+
+`./start.sh` também sobe `scripts/watchdog_loop.sh` (PID em
+`run/watchdog.pid`, log em `logs/watchdog.log`): a cada 30s ele chama de
+novo `ensure_services.sh` (sem rodar a suíte de testes de novo) — se
+qualquer um dos serviços da tabela acima tiver caído (crash, `kill`
+manual, etc.), ele sobe sozinho na próxima passada, sem precisar rodar
+`./start.sh` de novo. Só loga quando de fato reinicia algo ou algo falha
+ao subir — rodando saudável, fica em silêncio.
+
+**Limitação conhecida:** o próprio watchdog não tem supervisor — se ele
+morrer, nada o reinicia sozinho (é bash puro, subido pelo `start.sh`, sem
+depender de systemd/root). Pra supervisão sem esse ponto único de falha,
+use os units systemd (`systemd/replay-*.service`, `Restart=always` no
+nível do sistema operacional) quando for pra produção de verdade — ver
+"Rodando a API em produção" abaixo. As duas abordagens fazem a mesma
+coisa (manter os processos no ar); o watchdog é a opção que funciona hoje
+sem sudo, os units são a opção mais robusta pra quando isso for
+instalado como serviço de sistema.
 
 ## Como testar localmente (sem câmera real, sem hardware)
 
@@ -484,6 +525,7 @@ banco isolado (`$WORKDIR/repet_test.db`), não no `.data/repet.db` de dev.
 
 ## Rodando a API em produção
 
+Rápido, sem systemd (mesma ideia do `./start.sh`, manual):
 ```bash
 pip install -r requirements.txt   # fastapi, uvicorn
 export BUFFER_ROOT=/var/replay
@@ -491,53 +533,81 @@ export OUTPUT_DIR=/var/replay/output
 export CAMERAS_FILE=/opt/replay-system/config/cameras.json
 uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
-(Em produção, isso também vira um unit systemd — ainda não incluído aqui,
-mesmo padrão do `replay-capture@.service`.)
 
-## Funcionalidades futuras (planejadas via API de gerenciamento, não implementadas)
+**Com systemd (recomendado pra produção de verdade — `Restart=always` no
+próprio sistema operacional, sobrevive a reboot, sem depender do
+watchdog em bash descrito acima):** `systemd/` tem um unit por serviço,
+todos compartilhando um único `EnvironmentFile` (mesmas chaves do `.env`
+de dev, valores em `/var/replay` de verdade em vez de `.data/`):
 
-Discutido em 2026-09-17 — registrado aqui só como contexto pra quando
-entrar em desenvolvimento de verdade, nada disso existe no código ainda.
+| Unit | Serviço |
+|---|---|
+| `replay-api.service` | API |
+| `replay-capture@.service` | captura — 1 instância por câmera, `systemctl enable --now replay-capture@loc1-quadra1` etc., env próprio em `/etc/replay-system/cameras/<quadra_id>.env` |
+| `replay-buffer-cleanup.service` | limpeza do buffer |
+| `replay-local-retention.service` | retenção local dos clipes finais |
+| `replay-lara-worker.service` | worker do Lara — só habilite depois de preencher `LARA_BASE_URL`/`REPLAY_API_TOKEN` no env compartilhado |
 
-**Logo/marca d'água queimada no clipe.** Decidido: precisa estar queimada
-no arquivo (vale pra qualquer download, não só pra quem vê pelo site) —
-não dá pra ser só um overlay client-side no player.
-- Implicação: reverte a otimização `-c copy` pro clipe que levar logo —
+```bash
+sudo mkdir -p /opt/replay-system /etc/replay-system/cameras
+sudo cp -r . /opt/replay-system   # ou git clone direto lá
+cd /opt/replay-system && sudo python3 -m venv .venv && sudo .venv/bin/pip install -r requirements.txt
+sudo cp systemd/env-examples/replay-system.env.example /etc/replay-system/replay-system.env
+sudo "$EDITOR" /etc/replay-system/replay-system.env   # preencher de verdade
+sudo cp systemd/env-examples/loc1-quadra3.env /etc/replay-system/cameras/loc1-quadra1.env  # 1 por câmera
+sudo "$EDITOR" /etc/replay-system/cameras/loc1-quadra1.env
+sudo useradd -r -s /usr/sbin/nologin replay   # se ainda não existir
+sudo chown -R replay:replay /opt/replay-system /var/replay
+sudo cp systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now replay-api replay-buffer-cleanup replay-local-retention
+sudo systemctl enable --now replay-capture@loc1-quadra1
+# sudo systemctl enable --now replay-lara-worker   # só depois de configurar o Lara
+```
+Não testado neste repositório (exigiria root numa máquina real) — os
+units seguem o mesmo padrão do `replay-capture@.service` já existente
+desde antes, que também nunca foi instalado aqui. Confira `WorkingDirectory`/
+caminhos de `.venv` se o deploy real não usar `/opt/replay-system`.
+
+## Funcionalidades futuras (não implementadas)
+
+**Logo/marca d'água queimada no clipe: IMPLEMENTADA desde a pivotagem pro
+Lara (17/09/2026), não é mais "futura" — ver `integrations/overlay.py` e
+a seção "Integração com o Lara" acima.** O bloco abaixo (discutido em
+2026-09-17, antes da pivotagem) previa um cadastro de logo local que
+nunca chegou a ser codado; ficou substituído pelo Lara, que decide a
+logo e já entrega ela composta. Os fatos técnicos sobre custo de CPU
+abaixo continuam valendo pra implementação real de hoje — mantidos como
+referência:
+- Overlay reverte a otimização `-c copy` pro clipe que leva logo —
   overlay exige decodificar+recodificar o vídeo inteiro (limitação de
   qualquer codec preditivo tipo H.264, não é limitação do ffmpeg
-  especificamente).
-- Preset decidido pra quando isso for implementado: `ultrafast` do
-  libx264. Avaliado e descartado: forçar `profile=baseline` (o `ultrafast`
-  já desliga B-frames/CABAC/multi-ref por conta própria, ganho adicional
-  seria marginal); trocar de codec por VP9/AV1 (mais pesados de codificar
-  que H.264, na direção errada); MJPEG intra-only (mais rápido de
-  codificar, mas arquivo final bem maior — ruim pra servir publicamente).
-- Alavanca real pra baixar o custo: **aceleração de hardware de vídeo**
-  (Intel Quick Sync via VAAPI, ou NVENC/NVDEC da Nvidia) — decode+overlay+
-  encode rodando num bloco de silício dedicado em vez da CPU de uso geral.
-  Estimativa: cai de ~1000-1200% CPU pra CPU de um dígito só, recuperando
-  quase todo o ganho do `-c copy` mesmo com logo queimada. Isso eleva a
-  escolha de hardware do servidor central (ver seção abaixo) de
-  preferência pra pré-requisito.
-- **Alternativa nativa da câmera (HiLook/Hikvision):** existe uma função
-  de fábrica, **Picture Overlay** (`Configuration > Image > Picture
-  Overlay`), que sobrepõe uma imagem direto no ISP da câmera antes do
-  encode — sairia "de graça" (zero custo de servidor), mesma lógica de
-  como NVRs comerciais queimam OSD. Limitações confirmadas na
-  documentação oficial: imagem precisa ser **BMP 24-bit, máximo
-  128×128px** (dá pra um badge pequeno, não um banner); sem confirmação de
-  suporte a transparência (BMP 24-bit não tem alpha nativo). **Não
-  confirmado ainda** se fica realmente queimado em todo stream (RTSP/
-  gravação) ou só na visualização — validar na prática antes de confiar
-  em produção. Automação via API (ISAPI) **não confirmada**: o guia
-  oficial documenta OSD de texto via API, mas não achamos endpoint
-  documentado pra Picture Overlay — precisaria capturar a requisição real
-  via DevTools do navegador numa câmera física pra confirmar. É uma logo
-  fixa (não dá pra trocar por clipe/evento).
+  especificamente). Implementado com preset `ultrafast` do libx264
+  (decidido aqui em 2026-09-17, confirmado na implementação real).
+  Avaliado e descartado na época: forçar `profile=baseline` (o
+  `ultrafast` já desliga B-frames/CABAC/multi-ref por conta própria,
+  ganho adicional seria marginal); trocar de codec por VP9/AV1 (mais
+  pesados de codificar que H.264, na direção errada); MJPEG intra-only
+  (mais rápido de codificar, mas arquivo final bem maior — ruim pra
+  servir publicamente).
+- Alavanca real pra baixar o custo, ainda não aplicada: **aceleração de
+  hardware de vídeo** (Intel Quick Sync via VAAPI, ou NVENC/NVDEC da
+  Nvidia) — decode+overlay+encode rodando num bloco de silício dedicado
+  em vez da CPU de uso geral. Estimativa: cai de ~1000-1200% CPU pra CPU
+  de um dígito só. Depende do hardware do servidor central (ver seção
+  abaixo, "parado indefinidamente" segundo o responsável) — não é
+  pré-requisito pra funcionar, só pra reduzir custo de fila em pico.
+- **Alternativa nativa da câmera (HiLook/Hikvision, Picture Overlay):**
+  levantada e avaliada antes da pivotagem pro Lara (BMP 24-bit, máximo
+  128×128px, sem confirmação de suporte a transparência nem de
+  automação via API/ISAPI) — deixou de ser relevante, o Lara já resolve
+  a composição da logo do lado dele. Mantido só como registro histórico,
+  não é mais caminho ativo.
 
-**Música/trilha de áudio.** Barato: não exige tocar no vídeo (`-c:v copy`
-continua valendo), só o áudio é (re)codificado — custo de CPU desprezível,
-compatível com a otimização atual do trim.
+**Música/trilha de áudio.** Ainda não implementado. Barato quando for:
+não exige tocar no vídeo (`-c:v copy` continua valendo), só o áudio é
+(re)codificado — custo de CPU desprezível, compatível com a otimização
+atual do trim.
 
 ### Servidor central (hardware — ainda em aberto)
 
@@ -584,8 +654,14 @@ acelerar esse reencode de jeito nenhum, nem encaixando uma GPU dedicada
    `ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default. Só endpoints JSON, sem
    página web (ver nota de escopo no topo do README). Frontend/painel que
    consumir essa API é de outro projeto.
-7. 🔶 Limpeza do buffer (retenção fixa de 2min) — funcionando via
-   `scripts/cleanup_loop.sh`, subido automaticamente pelo `start.sh`. Cron
-   real de sistema (produção com systemd) ainda não instalado.
-8. ⬜ Unit systemd pra rodar a própria API (hoje só documentado/via
-   `start.sh` manual, não incluído como serviço de sistema).
+7. ✅ Limpeza do buffer (retenção fixa de 2min, `scripts/cleanup_loop.sh`)
+   e retenção local dos clipes finais (`LOCAL_RAW_RETENTION_DAYS`,
+   `scripts/local_retention_loop.py`, S3) — as duas sobem automaticamente
+   pelo `start.sh`, sem depender de cron do sistema.
+8. ✅ Supervisão dos serviços: watchdog em bash (`scripts/watchdog_loop.sh`,
+   sobe junto com `./start.sh`, reinicia o que cair a cada 30s, sem
+   depender de systemd/root) **e** units systemd de verdade
+   (`systemd/replay-*.service`, `Restart=always` no sistema operacional —
+   ver "Rodando a API em produção") pra quando isso for instalado como
+   serviço de sistema. Os units não foram instalados/testados neste
+   repositório (exigiria root numa máquina real).
