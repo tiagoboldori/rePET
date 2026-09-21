@@ -389,10 +389,24 @@ primeiras — são endereço/credencial de outro sistema):
 | `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | não (default `10`) | Intervalo entre passadas da fila de envio de clipes — só afeta a LATÊNCIA de detectar um replay novo pendente, não o ritmo de retentativa de um que já falhou (ver backoff abaixo) |
 | `LOCAL_RAW_RETENTION_DAYS` | não (default `3`, a confirmar) | Retenção do arquivo local, usado só pela página de teste `/quadra/{id}` — não é a entrega ao sócio (essa é do Lara, 7 dias) |
 
-Sem `LARA_BASE_URL`/`REPLAY_API_TOKEN` definidos, `./start.sh` não sobe o
-worker do Lara e avisa — o resto do sistema (captura, corte, página
-pública) continua funcionando normalmente. Diagnóstico manual (chama
-`/ping` e `/cameras` ao vivo e compara com o cache local):
+**Configuração persistente (recomendado):** `cp .env.example .env`,
+preencher `LARA_BASE_URL`/`REPLAY_API_TOKEN`/`ADMIN_USERNAME`/
+`ADMIN_PASSWORD` (e qualquer um dos ajustes finos opcionais) e rodar
+`./start.sh` de novo — ele carrega `.env` automaticamente se existir,
+sem sobrescrever nada que já esteja exportado no ambiente (útil se um
+deploy real preferir setar via systemd `EnvironmentFile=` em vez deste
+arquivo). `.env` é gitignored — nunca commitar credencial real aqui,
+mesmo padrão já usado em `config/cameras.json`. Alternativa sem arquivo:
+`export REPLAY_API_TOKEN=...` na sessão de shell antes de `./start.sh`
+(não sobrevive a reboot/novo terminal).
+
+Sem `LARA_BASE_URL`/`REPLAY_API_TOKEN` definidos (nem no `.env` nem no
+ambiente), `./start.sh` não sobe o worker do Lara e avisa — o resto do
+sistema (captura, corte, página pública) continua funcionando
+normalmente. Sem `ADMIN_USERNAME`/`ADMIN_PASSWORD`, `DELETE
+/api/replays/{id}` recusa toda requisição com `401` (deny-by-default, ver
+seção "Endpoint da API"). Diagnóstico manual (chama `/ping` e `/cameras`
+ao vivo e compara com o cache local):
 
 ```bash
 python -m scripts.lara_diagnostic

@@ -29,6 +29,27 @@ info() { echo "[INFO]    $*"; }
 echo "== rePET start.sh =="
 echo
 
+# --- 0) Carrega .env local, se existir ----------------------------------
+# Credenciais (LARA_BASE_URL, REPLAY_API_TOKEN, ADMIN_USERNAME,
+# ADMIN_PASSWORD) e ajustes finos opcionais NÃO têm default de propósito
+# (ver api/config.py) — sem isso, cada sessão de shell nova exigiria
+# `export` manual antes de rodar este script, o que não sobrevive a
+# reboot nem é prático em produção. Mesmo padrão já usado em
+# config/cameras.json: arquivo real gitignored, `.env.example` versionado
+# como modelo (`cp .env.example .env` e preencher). Valores que já vêm de
+# variável de ambiente do chamador (ex.: systemd EnvironmentFile=, ou um
+# `export` manual) continuam tendo prioridade — `.env` só preenche o que
+# ainda não estiver setado.
+if [[ -f "$ROOT/.env" ]]; then
+    info "Carregando $ROOT/.env (variável já exportada no ambiente tem prioridade) ..."
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        if [[ -z "${!key:-}" ]]; then
+            export "$key=$value"
+        fi
+    done < <(grep -vE '^\s*(#|$)' "$ROOT/.env")
+fi
+
 # --- 1) Ambiente Python -----------------------------------------------
 if [[ ! -x "$PY" ]]; then
     info "Criando venv em .venv/ ..."
