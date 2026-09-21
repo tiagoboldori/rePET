@@ -276,12 +276,24 @@ clipper/
                             o segmento ainda sendo escrito (race condition)
 db/
   engine.py             -> Engine SQLite (modo WAL) + sessão (PT-01)
-  models.py             -> Local, Esporte, Quadra (PT-10) e Replay (PT-01),
-                            com índice composto quadra_id+criado_em. Logo
-                            entra em PT-14.
+  models.py             -> Local, Esporte, Quadra (PT-10, com espelho local da
+                            config do Lara) e Replay (PT-01, com estado de
+                            envio ao Lara), índice composto quadra_id+criado_em.
+                            Não existe entidade Logo — isso é do Lara.
   migrate_cameras.py    -> Sincroniza Local/Esporte/Quadra a partir de
                             config/cameras.json (PT-10), idempotente, chamado
                             no startup da API (main.py)
+integrations/
+  lara_client.py         -> Cliente HTTP da API do Lara (/ping, /cameras,
+                            heartbeat, upload de vídeo) — mapeia cada status
+                            HTTP num tipo de erro próprio
+  config_sync.py         -> Pull de GET /cameras com cache por config_hash;
+                            baixa overlay novo e atualiza Quadra
+  overlay.py             -> Aplica (nunca decide) o overlay em cache no clipe,
+                            via ffmpeg, escalando pro tamanho real do vídeo
+  upload_queue.py        -> Processa Replay pendente: aplica overlay, envia
+                            ao Lara, idempotente por external_id do clipe
+  heartbeat.py           -> Heartbeat periódico por câmera; falha só loga
 config/
   cameras.json          -> Registro central de câmeras (fonte única de verdade;
                             gitignored — tem credencial real, nunca commitado)
@@ -294,13 +306,48 @@ scripts/
   cleanup_segments.sh       -> Um passe de limpeza do buffer (retenção: últimos 2min)
   cleanup_loop.sh           -> Roda cleanup_segments.sh em loop (usado pelo start.sh
                                 enquanto o cron real de produção não existe)
+  lara_worker.py            -> Processo com as 3 rotinas de fundo da integração
+                                com o Lara: sync de config, fila de envio, heartbeat
+  lara_diagnostic.py        -> Chama /ping e mostra a config em cache por câmera
 test/
-  test_db.py             -> pytest: camada de persistência (db/) — criação de
-                            tabela, índice e round-trip de insert/consulta
-  run_pipeline_test.sh   -> Testa capture + clipper direto (sem API, sem câmera real)
-  run_api_test.sh        -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
+  test_db.py               -> pytest: camada de persistência (db/) — criação de
+                                tabela, índice e round-trip de insert/consulta
+  test_lara_integration.py -> pytest: cliente do Lara (mapeamento de erro),
+                                cache por config_hash, fila de envio, overlay
+  run_pipeline_test.sh     -> Testa capture + clipper direto (sem API, sem câmera real)
+  run_api_test.sh          -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
 start.sh                  -> Sobe venv/deps, roda os testes padrão, a API, a captura de
-                              cada câmera e a limpeza do buffer
+                              cada câmera, a limpeza do buffer e o worker do Lara
+                              (se LARA_BASE_URL/REPLAY_API_TOKEN estiverem definidos)
+```
+
+## Integração com o Lara (PT-14/PT-15)
+
+O Lara é o sistema de gestão do clube e passa a ser a fonte de verdade da
+configuração operacional (orientação de vídeo, duração do clipe e
+logomarca) e o repositório de entrega do clipe ao sócio. Este repositório
+nunca decide nenhuma dessas três coisas — só consulta, aplica
+mecanicamente e envia. Detalhes de arquitetura e requisitos em
+`PLANO_DE_ACAO.md` (seção 6) e `PLANEJAMENTO.md`.
+
+Variáveis de ambiente novas (sem default de propósito para as duas
+primeiras — são endereço/credencial de outro sistema):
+
+| Variável | Obrigatória | Descrição |
+|---|---|---|
+| `LARA_BASE_URL` | sim, pra ligar a integração | Base da API do Lara, ex. `https://lara.clube.example/api/replay` |
+| `REPLAY_API_TOKEN` | sim, pra ligar a integração | Token pessoal Sanctum, gerado por `php artisan replay:token` do lado do Lara |
+| `OVERLAY_CACHE_DIR` | não (default `/var/replay/overlays`) | Onde os overlays baixados ficam em cache local |
+| `LARA_POLL_INTERVAL_SECONDS` | não (default `120`) | Intervalo entre pulls de `GET /cameras` e heartbeats |
+| `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | não (default `10`) | Intervalo entre passadas da fila de envio de clipes |
+| `LOCAL_RAW_RETENTION_DAYS` | não (default `3`, a confirmar) | Retenção do arquivo local, usado só pela página de teste `/quadra/{id}` — não é a entrega ao sócio (essa é do Lara, 7 dias) |
+
+Sem `LARA_BASE_URL`/`REPLAY_API_TOKEN` definidos, `./start.sh` não sobe o
+worker do Lara e avisa — o resto do sistema (captura, corte, página
+pública) continua funcionando normalmente. Diagnóstico manual:
+
+```bash
+python -m scripts.lara_diagnostic
 ```
 
 ## Como rodar (jeito rápido)

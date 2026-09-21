@@ -17,7 +17,7 @@ from sqlmodel import Session, SQLModel, select
 
 from db import engine as engine_module
 from db.migrate_cameras import sync_cameras_from_file
-from db.models import Esporte, Local, Quadra, Replay, ReplayStatus
+from db.models import Esporte, Local, Quadra, Replay, ReplayLaraStatus
 
 
 def _make_engine(tmp_path, name="test_repet.db"):
@@ -98,8 +98,8 @@ def test_create_tables_and_roundtrip(tmp_path):
         "loc1-quadra1_20260917141500",
         "loc1-quadra1_20260917140000",
     ]
-    assert all(r.estado == ReplayStatus.BRUTO for r in replays)
-    assert all(r.arquivo_marcado is None for r in replays)
+    assert all(r.lara_status == ReplayLaraStatus.PENDENTE for r in replays)
+    assert all(r.arquivo_com_overlay is None for r in replays)
 
 
 def test_replay_requires_existing_quadra(tmp_path):

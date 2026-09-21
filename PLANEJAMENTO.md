@@ -1,11 +1,13 @@
 # Planejamento de Execução — Ciclo Estendido (Opção B)
 
 **Projeto:** rePET — sistema de replay de vídeo para quadras esportivas
-**Versão:** 3 — revisada em 17/09/2026 (mesmo dia da v2) para incorporar a
-extensão da Opção B: os três pacotes que a Opção A adiaria (gerenciamento de
-câmeras, saúde por câmera, listagem entre quadras — ver `PLANO_DE_ACAO.md`
-seção 8) permanecem neste mesmo ciclo, em três dias úteis adicionais (D11 a
-D13, seção 4).
+**Versão:** 4 — revisada em 17/09/2026 para substituir os pacotes PT-14
+(cadastro/hierarquia de logo) e PT-15 (aplicação assíncrona de logo) pelo
+cliente do Lara (pull de configuração + envio do clipe + heartbeat +
+diagnóstico), conforme `PLANO_DE_ACAO.md` v3. A extensão da Opção B (D11 a
+D13, seção 4) é independente dessa troca — motivada por PT-16/17/18
+(gerenciamento de câmeras, saúde por câmera, listagem entre quadras), não
+pela logo — e permanece inalterada.
 **Documento de referência:** `PLANO_DE_ACAO.md` (requisitos e priorização MoSCoW)
 
 Este planejamento estabelece o cronograma do ciclo e serve como instrumento
@@ -47,13 +49,25 @@ O método é aplicado somente à Frente A. Montagem de placa e configuração de
 rede não são funcionalidade de software e foram estimadas por decomposição
 de tarefas.
 
+**Nota desta revisão (v4):** a contagem abaixo é a da v3, mantida como
+referência de ordem de grandeza — ela ainda conta pontos de função de
+cadastro/hierarquia de logo (ALI "Logo", EE de operações de logo, SE de
+aplicação/logo efetiva) que não existem mais no escopo (ver
+`PLANO_DE_ACAO.md` v3, seções 6-8). Uma recontagem específica para o
+cliente do Lara (pull de configuração, fila de envio, heartbeat,
+diagnóstico) fica pendente da leitura do `docs/replay-api.md` completo do
+Lara. Até lá, a alocação de horas do bloco correspondente (Must + Should)
+é mantida como estava, por ser a estimativa disponível mais próxima em
+natureza (também sem custo de vídeo no pull/cadastro e com custo
+concentrado no pacote de processamento).
+
 | Tipo | Itens | PF |
 |---|---|---|
-| ALI — arquivos internos | Replay, Quadra, Local, Esporte, Logo, Configuração | 42 |
-| AIE — arquivos externos | Buffer de segmentos em tmpfs | 5 |
-| EE — entradas | Acionamento, remoção de replay, três operações de câmera, configuração, três operações de logo, reconciliação, locais, reprocessamento | 45 |
-| SE — saídas | Entrega de mídia, saúde da câmera, página pública, retenção, aplicação da logo, logo efetiva | 31 |
-| CE — consultas | Replay individual, listagem por quadra, listagem entre quadras, câmeras, configuração, saúde, logos, locais | 29 |
+| ALI — arquivos internos | Replay, Quadra (com espelho de config do Lara), Local, Esporte, Configuração | 42 |
+| AIE — arquivos externos | Buffer de segmentos em tmpfs, API do Lara (cameras/heartbeat/videos) | 5 |
+| EE — entradas | Acionamento, remoção de replay, três operações de câmera, configuração, envio de clipe ao Lara, heartbeat, reconciliação, locais | 45 |
+| SE — saídas | Entrega de mídia, saúde da câmera, página pública, retenção local, aplicação do overlay, diagnóstico | 31 |
+| CE — consultas | Replay individual, listagem por quadra, listagem entre quadras, câmeras, configuração, saúde, cache de config do Lara, locais | 29 |
 | | **Não ajustados** | **152** |
 | | Fator de ajuste (0,65 + 0,01 × 40) | 1,05 |
 | | **Ajustados** | **≈ 160** |
@@ -63,7 +77,7 @@ de tarefas.
 | Faixa | PF | Esforço | Situação |
 |---|---|---|---|
 | Must have | 79 | 48 h | Comprometido |
-| Should have (aplicação da logo) | 7 | 9 h | Comprometido, com função de amortecedor |
+| Should have (heartbeat, diagnóstico, retenção local) | 7 | 9 h | Comprometido, com função de amortecedor |
 | Reincorporado ao ciclo — Opção B (PT-16/17/18) | 32 | ≈ 21 h | Comprometido, extensão D11-D13 (seção 4) |
 | Could have | 27 | ≈ 18 h | Fora do ciclo |
 | Já implementado | 7 | — | Linha de base |
@@ -121,10 +135,10 @@ operações de consulta e cadastro — mais produtivas por ponto que PT-15.
 | D4 | ter, 22/09 | PT-03 Reconciliação (3 h) + PT-04 Metadados do replay (1,5 h) + PT-05 Entrega da mídia, início (1,5 h) | 7 | 6 |
 | D5 | qua, 23/09 | PT-05 conclusão (3,5 h) + PT-06 Listagem paginada por quadra (2,5 h de 3,5) | 5 | 6 |
 | D6 | qui, 24/09 | PT-06 conclusão (1 h) + PT-07 Remoção de replay (2,5 h) + PT-08 Autenticação (2,5 h) | 7 | 6 |
-| D7 | sex, 25/09 | PT-14 Logos: entidade, escopo, envio, listagem, remoção e regra de resolução (6 h de 8) | — | 6 |
+| D7 | sex, 25/09 | PT-14 Cliente do Lara: autenticação, `GET /ping`/`GET /cameras`, cache local por `config_hash` (orientação, duração, overlay) (6 h de 8) | — | 6 |
 | D8 | seg, 28/09 | PT-14 conclusão (2 h) + PT-09 Suíte de testes (4 h) — **marco M-1** | 21 | 6 |
-| D9 | ter, 29/09 | PT-15 Aplicação assíncrona da logo: fila, worker, estado, fallback (6 h de 9) | — | 6 |
-| D10 | qua, 30/09 | PT-15 conclusão (3 h) + documentação e fechamento (2,5 h) — **marco M-2** | 7 | 5,5 |
+| D9 | ter, 29/09 | PT-15 Aplicação do overlay e envio ao Lara: queima via ffmpeg, fila, idempotência por `external_id`, retentativa (6 h de 9) | — | 6 |
+| D10 | qua, 30/09 | PT-15 conclusão (3 h) + heartbeat, diagnóstico e fechamento (2,5 h) — **marco M-2** | 7 | 5,5 |
 | D11 | qui, 01/10 | PT-16 Gerenciamento de câmeras via API: criar, alterar, remover, validação de RTSP/codec (6 h de 8) | — | 6 |
 | D12 | sex, 02/10 | PT-16 conclusão (2 h) + PT-17 Saúde e defasagem por câmera, início (4 h de 6) | 12 | 6 |
 | D13 | seg, 05/10 | PT-17 conclusão (2 h) + PT-18 Listagem de replays entre quadras com filtros, início (4 h de 7) — **marco M-3** | 9 | 6 |
@@ -141,8 +155,10 @@ longo da primeira semana ou absorvida por PT-15.
 **Pontos de atenção.** PT-05 é o pacote com maior risco de subestimação: o
 suporte a requisições parciais envolve cabeçalhos `Range`, respostas 206 e
 tratamento de faixas inválidas, e deve ser validado com cliente real. PT-14
-concentra a regra de precedência da logo, que é lógica de falha silenciosa e
-exige teste em todos os quatro níveis da hierarquia. PT-08 e PT-09 não geram
+concentra o cache por `config_hash` — lógica que, se falhar, faz o motor
+reprocessar configuração à toa (barato) ou, pior, nunca perceber uma
+mudança publicada (silencioso) — exige teste explícito de "hash mudou" e
+"hash não mudou". PT-08 e PT-09 não geram
 pontos de função — autenticação é característica geral já contemplada no
 fator de ajuste, e teste é atividade de verificação —, mas recebem alocação
 própria por serem condição de aceitação. Na extensão, PT-17 depende de
@@ -157,8 +173,8 @@ amortecedor da extensão.
 
 | Marco | Data | Condição |
 |---|---|---|
-| **M-1** — Bloco *Must* concluído | 28/09 (fim de D8) | MVP funcional com cadastro e resolução de logo operantes, critérios de aceitação verificados |
-| **M-2** — Bloco *Should* concluído | 30/09 (fim de D10) | Logo efetivamente aplicada ao vídeo, de forma assíncrona |
+| **M-1** — Bloco *Must* concluído | 28/09 (fim de D8) | MVP funcional com cliente do Lara operante (pull de configuração cacheado e envio idempotente do clipe), critérios de aceitação verificados |
+| **M-2** — Bloco *Should* concluído | 30/09 (fim de D10) | Overlay efetivamente aplicado ao vídeo antes do envio, heartbeat e diagnóstico no ar |
 | **M-3** — Ciclo completo (Opção B) | 05/10 (fim de D13), com cauda de PT-18 tolerada até 06/10 | Gerenciamento de câmeras e saúde por câmera operantes; listagem entre quadras concluída |
 
 M-1 é o ponto de decisão do ciclo. Havendo atraso acumulado, a orientação é
@@ -282,7 +298,9 @@ fixo é requisito e não preferência.
 3. Disponibilidade de ambiente com pelo menos uma câmera RTSP acessível para
    validação.
 4. ~~Definição da ordem de precedência entre esporte e local até o início de
-   PT-14, em 25/09~~ — **resolvido em 17/09/2026**, mantida como documentada
-   (esporte acima de local).
+   PT-14, em 25/09~~ — **sem objeto a partir de 17/09/2026**: a resolução de
+   logo passou a ser responsabilidade do Lara (ver `PLANO_DE_ACAO.md` v3,
+   seção 12); PT-14 muda de conteúdo (cliente do Lara), não depende mais
+   dessa decisão.
 5. As estimativas da Frente B pressupõem entrega completa dos componentes;
    entrega parcial altera a sequência dos pacotes e motiva revisão.

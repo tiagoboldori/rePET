@@ -69,7 +69,7 @@ ls -la "$OUTPUT_DIR"
 echo "== 9) Validando que o replay foi registrado no banco (PT-02) =="
 REPLAY_ID=$(basename "$CLIP_URL" .mp4)
 sqlite3 "${WORKDIR}/repet_test.db" \
-    "SELECT id, quadra_id, estado, duracao_segundos, tamanho_bytes FROM replay WHERE id = '${REPLAY_ID}';"
+    "SELECT id, quadra_id, lara_status, duracao_segundos, tamanho_bytes FROM replay WHERE id = '${REPLAY_ID}';"
 COUNT=$(sqlite3 "${WORKDIR}/repet_test.db" "SELECT COUNT(*) FROM replay WHERE id = '${REPLAY_ID}';")
 if [[ "$COUNT" != "1" ]]; then
     echo "FALHOU: replay '${REPLAY_ID}' não encontrado no banco (esperado 1 linha, achou ${COUNT})" >&2

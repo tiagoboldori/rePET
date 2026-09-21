@@ -156,6 +156,36 @@ else
 fi
 echo
 
+# --- 5.5) Sobe o worker de integração com o Lara (se configurado) ------
+# LARA_BASE_URL e REPLAY_API_TOKEN não têm default aqui de propósito — são
+# credencial/endereço de outro sistema, não algo pra inventar. Defina-os no
+# ambiente antes de rodar ./start.sh (ex.: `export REPLAY_API_TOKEN=...`)
+# quando a integração estiver pronta pra ligar; até lá, o worker fica fora
+# do ar e o resto do sistema continua funcionando normalmente (PT-14/PT-15
+# são Should/Must deste ciclo, mas nunca bloqueiam o botão — RNF9).
+export OVERLAY_CACHE_DIR="$ROOT/.data/overlays"
+mkdir -p "$OVERLAY_CACHE_DIR"
+
+if [[ -z "${LARA_BASE_URL:-}" || -z "${REPLAY_API_TOKEN:-}" ]]; then
+    info "LARA_BASE_URL/REPLAY_API_TOKEN não definidos — worker do Lara não sobe (integração ainda não configurada)."
+else
+    LARA_PID_FILE="$RUN_DIR/lara_worker.pid"
+    if [[ -f "$LARA_PID_FILE" ]] && kill -0 "$(cat "$LARA_PID_FILE")" 2>/dev/null; then
+        ok "Worker do Lara já rodando (PID $(cat "$LARA_PID_FILE"))"
+    else
+        info "Subindo worker do Lara (sync/upload/heartbeat) ..."
+        nohup "$PY" -m scripts.lara_worker >>"$LOG_DIR/lara_worker.log" 2>&1 &
+        echo $! > "$LARA_PID_FILE"
+        sleep 1
+        if kill -0 "$(cat "$LARA_PID_FILE")" 2>/dev/null; then
+            ok "Worker do Lara no ar (PID $(cat "$LARA_PID_FILE")), log em logs/lara_worker.log"
+        else
+            fail "Worker do Lara caiu ao subir — veja logs/lara_worker.log"
+        fi
+    fi
+fi
+echo
+
 # --- 6) Resumo final ------------------------------------------------------
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 IP="${IP:-127.0.0.1}"

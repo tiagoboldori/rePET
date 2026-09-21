@@ -1,0 +1,402 @@
+"""
+test_lara_integration.py — testes do cliente do Lara, do cache de
+configuração (config_hash) e da fila de envio (PT-14/PT-15,
+PLANO_DE_ACAO.md v3). Sem rede real: `requests` é substituído por um
+transporte falso, e `apply_overlay` é isolado do ffmpeg de verdade
+substituindo `_run` — o que importa aqui é a lógica de decisão (hash
+mudou? qual overlay preferir? qual exceção mapear?), não o ffmpeg em si
+(coberto pelos testes de pipeline existentes).
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+from sqlmodel import Session, SQLModel, select
+
+from db import engine as engine_module
+from db.models import Esporte, Local, Quadra, Replay, ReplayLaraStatus
+from integrations import config_sync, heartbeat, upload_queue
+from integrations.lara_client import (
+    CameraConfig,
+    LaraAuthError,
+    LaraClient,
+    LaraNotFoundError,
+    LaraPayloadTooLargeError,
+    LaraRateLimitError,
+    LaraServerError,
+    LaraValidationError,
+    OverlayConfig,
+    UploadResult,
+)
+from integrations.overlay import OverlayApplicationError, apply_overlay
+
+
+def _make_engine(tmp_path):
+    db_path = tmp_path / "test_repet.db"
+    engine = engine_module.create_sqlite_engine(f"sqlite:///{db_path}")
+    SQLModel.metadata.create_all(engine)
+    return engine
+
+
+def _seed_quadra(session: Session, quadra_id: str = "loc1-quadra1") -> None:
+    session.add(Local(id="loc1", nome="Loc1"))
+    session.add(Esporte(id="futsal", nome="Futsal"))
+    session.add(
+        Quadra(
+            id=quadra_id,
+            local_id="loc1",
+            esporte_id="futsal",
+            nome="Quadra 1",
+            input_url="rtsp://user:senha@10.0.0.1:554/stream1",
+        )
+    )
+    session.commit()
+
+
+# --- LaraClient: mapeamento de erro por status HTTP -----------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, json_body: dict | list | None = None, ok: bool | None = None):
+        self.status_code = status_code
+        self._json_body = json_body
+        self.ok = ok if ok is not None else 200 <= status_code < 300
+
+    def json(self):
+        if self._json_body is None:
+            raise ValueError("sem corpo JSON")
+        return self._json_body
+
+
+def _client_with_fake_response(monkeypatch, response: _FakeResponse) -> LaraClient:
+    client = LaraClient(base_url="https://lara.example/api/replay", token="1|abc")
+    monkeypatch.setattr(client._session, "request", lambda *a, **kw: response)
+    return client
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_error_raised(monkeypatch, status):
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(status))
+    with pytest.raises(LaraAuthError):
+        client.ping()
+
+
+def test_not_found_error_raised(monkeypatch):
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(404))
+    with pytest.raises(LaraNotFoundError):
+        client.get_camera("quadra-fantasma")
+
+
+def test_validation_error_with_body(monkeypatch):
+    body = {"message": "duration_seconds inválido"}
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(422, json_body=body))
+    with pytest.raises(LaraValidationError, match="duration_seconds inválido"):
+        client.send_heartbeat("loc1-quadra1")
+
+
+def test_payload_too_large_on_422_empty_body(monkeypatch):
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(422, json_body=None))
+    with pytest.raises(LaraPayloadTooLargeError):
+        client.send_heartbeat("loc1-quadra1")
+
+
+def test_payload_too_large_on_413(monkeypatch):
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(413))
+    with pytest.raises(LaraPayloadTooLargeError):
+        client.send_heartbeat("loc1-quadra1")
+
+
+def test_rate_limit_error(monkeypatch):
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(429))
+    with pytest.raises(LaraRateLimitError):
+        client.send_heartbeat("loc1-quadra1")
+
+
+def test_server_error(monkeypatch):
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(500))
+    with pytest.raises(LaraServerError):
+        client.send_heartbeat("loc1-quadra1")
+
+
+def test_get_cameras_parses_config_hash_and_overlay(monkeypatch):
+    body = [
+        {
+            "external_id": "loc1-quadra1",
+            "config_hash": "abc123",
+            "orientation": "vertical",
+            "clip_seconds": 20,
+            "overlay": {
+                "png_url": "https://lara.example/overlays/abc.png",
+                "animated_url": None,
+                "width": 1080,
+                "height": 1920,
+            },
+        }
+    ]
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(200, json_body=body))
+    cameras = client.get_cameras()
+    assert len(cameras) == 1
+    assert cameras[0].config_hash == "abc123"
+    assert cameras[0].orientation == "vertical"
+    assert cameras[0].overlay.png_url == "https://lara.example/overlays/abc.png"
+    assert cameras[0].overlay.animated_url is None
+
+
+# --- config_sync: config_hash como cache barato ----------------------------
+
+
+class _FakeLaraClientForSync:
+    """Substitui LaraClient nos testes de config_sync/upload_queue — não
+    fala com requests, só devolve o que o teste configurar."""
+
+    def __init__(self, cameras=None):
+        self._cameras = cameras or []
+        self.download_calls: list[tuple[str, Path]] = []
+        self.upload_calls: list[dict] = []
+        self.heartbeat_calls: list[str] = []
+        self._upload_result = UploadResult(uuid="u1", url="https://lara/x.mp4", expires_at="2026-09-24T00:00:00", duplicated=False)
+        self._upload_exception = None
+
+    def get_cameras(self):
+        return self._cameras
+
+    def download_to(self, url: str, dest: Path) -> None:
+        self.download_calls.append((url, dest))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake")
+
+    def upload_video(self, **kwargs):
+        self.upload_calls.append(kwargs)
+        if self._upload_exception:
+            raise self._upload_exception
+        return self._upload_result
+
+    def send_heartbeat(self, external_id: str) -> None:
+        self.heartbeat_calls.append(external_id)
+
+
+def test_sync_once_skips_when_hash_unchanged(tmp_path):
+    engine = _make_engine(tmp_path)
+    with Session(engine) as session:
+        _seed_quadra(session)
+        quadra = session.get(Quadra, "loc1-quadra1")
+        quadra.lara_config_hash = "same-hash"
+        session.add(quadra)
+        session.commit()
+
+        client = _FakeLaraClientForSync(
+            cameras=[
+                CameraConfig(
+                    external_id="loc1-quadra1",
+                    config_hash="same-hash",
+                    orientation="horizontal",
+                    clip_seconds=35,
+                    overlay=None,
+                )
+            ]
+        )
+        changed = config_sync.sync_once(session, client, tmp_path / "overlays")
+        assert changed == 0
+        assert client.download_calls == []  # pull barato: nenhuma chamada extra
+
+
+def test_sync_once_updates_and_downloads_overlay_when_hash_changes(tmp_path):
+    engine = _make_engine(tmp_path)
+    overlay_dir = tmp_path / "overlays"
+    with Session(engine) as session:
+        _seed_quadra(session)
+
+        client = _FakeLaraClientForSync(
+            cameras=[
+                CameraConfig(
+                    external_id="loc1-quadra1",
+                    config_hash="new-hash",
+                    orientation="vertical",
+                    clip_seconds=20,
+                    overlay=OverlayConfig(
+                        png_url="https://lara.example/o.png",
+                        animated_url=None,
+                        width=1080,
+                        height=1920,
+                    ),
+                )
+            ]
+        )
+        changed = config_sync.sync_once(session, client, overlay_dir)
+        assert changed == 1
+        assert len(client.download_calls) == 1
+
+        quadra = session.get(Quadra, "loc1-quadra1")
+        assert quadra.orientation == "vertical"
+        assert quadra.clip_seconds == 20
+        assert quadra.lara_config_hash == "new-hash"
+        assert quadra.overlay_png_path == str(overlay_dir / "loc1-quadra1.png")
+        assert Path(quadra.overlay_png_path).is_file()
+
+
+def test_sync_once_ignores_camera_not_registered_locally(tmp_path):
+    engine = _make_engine(tmp_path)
+    with Session(engine) as session:
+        _seed_quadra(session)
+        client = _FakeLaraClientForSync(
+            cameras=[
+                CameraConfig(
+                    external_id="quadra-que-nao-existe-aqui",
+                    config_hash="h",
+                    orientation="horizontal",
+                    clip_seconds=35,
+                    overlay=None,
+                )
+            ]
+        )
+        changed = config_sync.sync_once(session, client, tmp_path / "overlays")
+        assert changed == 0
+
+
+# --- upload_queue: idempotência e classificação de erro --------------------
+
+
+def _seed_pending_replay(session: Session, output_dir: Path, replay_id: str = "loc1-quadra1_20260917140000") -> Replay:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    clip_file = output_dir / f"{replay_id}.mp4"
+    clip_file.write_bytes(b"fake mp4 content")
+    replay = Replay(
+        id=replay_id,
+        quadra_id="loc1-quadra1",
+        arquivo_bruto=clip_file.name,
+        criado_em=datetime(2026, 9, 17, 14, 0, 0),
+        duracao_segundos=35.0,
+        tamanho_bytes=clip_file.stat().st_size,
+    )
+    session.add(replay)
+    session.commit()
+    return replay
+
+
+def test_process_pending_marks_enviado_on_success(tmp_path):
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        _seed_pending_replay(session, output_dir)
+
+        client = _FakeLaraClientForSync()
+        upload_queue.process_pending(session, client, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.ENVIADO
+        assert replay.lara_uuid == "u1"
+        assert len(client.upload_calls) == 1
+        assert client.upload_calls[0]["clip_external_id"] == replay.id
+
+
+def test_process_pending_marks_falha_on_validation_error(tmp_path):
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        _seed_pending_replay(session, output_dir)
+
+        client = _FakeLaraClientForSync()
+        client._upload_exception = LaraValidationError("campo faltando")
+        upload_queue.process_pending(session, client, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.FALHA
+        assert "campo faltando" in replay.lara_ultimo_erro
+
+
+def test_process_pending_stays_pendente_on_server_error(tmp_path):
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        _seed_pending_replay(session, output_dir)
+
+        client = _FakeLaraClientForSync()
+        client._upload_exception = LaraServerError("500 do Lara")
+        upload_queue.process_pending(session, client, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.PENDENTE  # retentável — próxima passada tenta de novo
+
+
+# --- heartbeat: falha não propaga ------------------------------------------
+
+
+def test_heartbeat_failure_is_swallowed(tmp_path):
+    engine = _make_engine(tmp_path)
+    with Session(engine) as session:
+        _seed_quadra(session)
+        client = _FakeLaraClientForSync()
+
+        def _boom(external_id):
+            raise LaraServerError("indisponível")
+
+        client.send_heartbeat = _boom  # não deve levantar pra fora de send_all
+        heartbeat.send_all(session, client)  # não deve lançar
+
+
+# --- overlay: mecânica, nunca decide qual logo aplicar ---------------------
+
+
+def test_apply_overlay_returns_same_path_when_no_overlay_cached(tmp_path):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    quadra = Quadra(
+        id="loc1-quadra1", local_id="loc1", esporte_id="futsal",
+        nome="Quadra 1", input_url="rtsp://x",
+    )
+    result = apply_overlay(clip, quadra)
+    assert result == clip
+
+
+def test_apply_overlay_prefers_animated_over_png(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    animated = tmp_path / "loc1-quadra1.webm"
+    animated.write_bytes(b"fake webm")
+    png = tmp_path / "loc1-quadra1.png"
+    png.write_bytes(b"fake png")
+
+    quadra = Quadra(
+        id="loc1-quadra1", local_id="loc1", esporte_id="futsal",
+        nome="Quadra 1", input_url="rtsp://x",
+        overlay_animated_path=str(animated), overlay_png_path=str(png),
+    )
+
+    calls = []
+    monkeypatch.setattr("integrations.overlay._run", lambda cmd: calls.append(cmd))
+    monkeypatch.setattr("integrations.overlay.probe_resolution", lambda path: (1080, 1920))
+
+    result = apply_overlay(clip, quadra)
+    assert result.name == "loc1-quadra1_20260917140000_overlay.mp4"
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert str(animated) in cmd
+    assert str(png) not in cmd
+    assert "-stream_loop" in cmd
+
+
+def test_apply_overlay_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    png = tmp_path / "loc1-quadra1.png"
+    png.write_bytes(b"fake png")
+    quadra = Quadra(
+        id="loc1-quadra1", local_id="loc1", esporte_id="futsal",
+        nome="Quadra 1", input_url="rtsp://x", overlay_png_path=str(png),
+    )
+
+    def _boom(cmd):
+        raise OverlayApplicationError("ffmpeg explodiu")
+
+    monkeypatch.setattr("integrations.overlay._run", _boom)
+    monkeypatch.setattr("integrations.overlay.probe_resolution", lambda path: (1080, 1920))
+
+    with pytest.raises(OverlayApplicationError):
+        apply_overlay(clip, quadra)
+
+    assert not (tmp_path / "loc1-quadra1_20260917140000_overlay.mp4").exists()
