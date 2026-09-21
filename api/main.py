@@ -28,7 +28,8 @@ from clipper.clip_generator import (
 )
 from db.engine import create_db_and_tables, engine, get_session
 from db.migrate_cameras import sync_cameras_from_file
-from db.models import Replay
+from db.models import Quadra, Replay
+from db.reconcile import reconcile_replays
 
 
 @asynccontextmanager
@@ -36,6 +37,14 @@ async def lifespan(app: FastAPI):
     create_db_and_tables()
     with Session(engine) as session:
         sync_cameras_from_file(session, config.CAMERAS_FILE)
+        # PT-03 (M4): recupera no banco qualquer clipe que já exista em
+        # disco mas não tenha registro (ex.: banco perdido/recriado, ou
+        # clipes anteriores à introdução do banco). Nunca sobrescreve
+        # registro existente — só preenche ausência (RNF6: disco é a
+        # fonte de verdade final).
+        recuperados = reconcile_replays(session, config.OUTPUT_DIR)
+        if recuperados:
+            print(f"[api] reconciliação: {recuperados} replay(s) recuperado(s) do disco.")
     yield
 
 
@@ -87,12 +96,24 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
                 )
         _last_trigger[quadra_id] = now
 
+    # Duração do clipe vem do cache local sincronizado com o Lara
+    # (Quadra.clip_seconds, PT-14) quando já houver uma sincronização
+    # feita; nunca uma consulta ao vivo (RNF3/RNF8 do PLANO_DE_ACAO.md v3).
+    # Sem sincronização ainda (quadra recém-cadastrada), cai no default
+    # global — mesmo comportamento de antes desta integração.
+    quadra = session.get(Quadra, quadra_id)
+    clip_seconds = (
+        quadra.clip_seconds
+        if quadra is not None and quadra.clip_seconds is not None
+        else config.CLIP_DURATION_SECONDS
+    )
+
     try:
         clip_path = generate_clip(
             quadra_id,
             buffer_root=config.BUFFER_ROOT,
             output_dir=config.OUTPUT_DIR,
-            duration_seconds=config.CLIP_DURATION_SECONDS,
+            duration_seconds=clip_seconds,
             segment_time=config.SEGMENT_TIME,
             safety_margin=config.SAFETY_MARGIN,
             max_staleness_seconds=config.MAX_STALENESS_SECONDS,
@@ -103,8 +124,12 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
     # Registro no banco (M3) é best-effort: o clipe já está em disco e
     # servível nesse ponto — disco é a fonte de verdade final (RNF6), uma
     # falha aqui não pode impedir a entrega do replay que já foi gerado
-    # com sucesso (mesmo princípio de RNF9 pra falha de logo). Reconciliação
-    # de linhas ausentes é PT-03, ainda não implementada.
+    # com sucesso (mesmo princípio de RNF9 pra falha de envio ao Lara). O
+    # registro nasce com lara_status=PENDENTE (default do modelo) — quem
+    # envia ao Lara é o worker de fundo (scripts/lara_worker.py), nunca
+    # este caminho de requisição. Se esse registro se perder de qualquer
+    # forma, db.reconcile.reconcile_replays (PT-03) recupera no próximo
+    # start da API, lendo o arquivo já em disco.
     try:
         session.add(
             Replay(
