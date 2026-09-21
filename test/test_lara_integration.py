@@ -30,6 +30,7 @@ from integrations.lara_client import (
     OverlayConfig,
     UploadResult,
 )
+from integrations.orientation import OrientationApplicationError, apply_orientation
 from integrations.overlay import OverlayApplicationError, apply_overlay
 
 
@@ -381,6 +382,72 @@ def test_process_pending_resets_backoff_on_success(tmp_path):
         assert replay.lara_proxima_tentativa_em is None
 
 
+def test_process_pending_applies_backoff_on_local_processing_failure(tmp_path, monkeypatch):
+    """Achado numa auditoria: falha de processamento LOCAL (ffmpeg do
+    overlay/orientação, já visto na prática pelo menos uma vez em
+    produção) não era capturada em _process_one — propagava pra fora,
+    travava o resto da passada da fila e nunca aplicava backoff (batia
+    de novo a cada 10s pra sempre). RNF9 pede o mesmo tratamento de
+    qualquer outra falha retentável."""
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        _seed_pending_replay(session, output_dir)
+
+        def _boom(clip_path, quadra):
+            raise OverlayApplicationError("ffmpeg explodiu (transitório)")
+
+        monkeypatch.setattr(upload_queue, "apply_overlay", _boom)
+
+        client = _FakeLaraClientForSync()
+        upload_queue.process_pending(session, client, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.PENDENTE  # não é FALHA definitiva
+        assert replay.lara_tentativas == 1
+        assert replay.lara_proxima_tentativa_em > datetime.now()
+        assert "ffmpeg explodiu" in replay.lara_ultimo_erro
+        assert len(client.upload_calls) == 0  # nem chegou a tentar enviar
+
+
+def test_process_pending_chains_orientation_then_overlay_and_cleans_intermediate(tmp_path, monkeypatch):
+    """orientation roda antes de overlay (overlay precisa aplicar na
+    resolução já cortada) e o intermediário só-orientado não pode
+    sobrar em disco órfão — nem reconcile nem local_retention sabem
+    dele, só arquivo_bruto/arquivo_processado são rastreados."""
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        replay = _seed_pending_replay(session, output_dir)
+        clip_path = output_dir / replay.arquivo_bruto
+
+        def _fake_orientation(path, quadra):
+            oriented = path.with_name(f"{path.stem}_oriented.mp4")
+            oriented.write_bytes(b"oriented")
+            return oriented
+
+        def _fake_overlay(path, quadra):
+            assert path.name.endswith("_oriented.mp4")  # recebeu a saída da orientação, não o bruto
+            overlaid = path.with_name(f"{path.stem}_overlay.mp4")
+            overlaid.write_bytes(b"overlaid")
+            return overlaid
+
+        monkeypatch.setattr(upload_queue, "apply_orientation", _fake_orientation)
+        monkeypatch.setattr(upload_queue, "apply_overlay", _fake_overlay)
+
+        client = _FakeLaraClientForSync()
+        upload_queue.process_pending(session, client, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.ENVIADO
+        assert replay.arquivo_processado == f"{clip_path.stem}_oriented_overlay.mp4"
+        assert not (output_dir / f"{clip_path.stem}_oriented.mp4").exists()  # intermediário limpo
+        assert (output_dir / f"{clip_path.stem}_oriented_overlay.mp4").exists()  # final preservado
+        assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_oriented_overlay.mp4"
+
+
 # --- heartbeat: falha não propaga ------------------------------------------
 
 
@@ -458,3 +525,83 @@ def test_apply_overlay_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypa
         apply_overlay(clip, quadra)
 
     assert not (tmp_path / "loc1-quadra1_20260917140000_overlay.mp4").exists()
+
+
+# --- orientation: crop mecânico pro aspect ratio pedido pelo Lara ----------
+
+
+def _quadra_com_orientation(orientation: str | None) -> Quadra:
+    return Quadra(
+        id="loc1-quadra1", local_id="loc1", esporte_id="futsal",
+        nome="Quadra 1", input_url="rtsp://x", orientation=orientation,
+    )
+
+
+def test_apply_orientation_noop_when_not_synced_yet(tmp_path):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    assert apply_orientation(clip, _quadra_com_orientation(None)) == clip
+
+
+def test_apply_orientation_noop_on_unknown_value(tmp_path):
+    """Defensivo: o contrato do Lara só permite vertical/horizontal, mas
+    não vale travar se algum dia vier outra coisa — ignora, não decide."""
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    assert apply_orientation(clip, _quadra_com_orientation("diagonal")) == clip
+
+
+def test_apply_orientation_noop_when_already_matches_target(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    monkeypatch.setattr("integrations.orientation.probe_resolution", lambda path: (1920, 1080))
+
+    calls = []
+    monkeypatch.setattr("integrations.orientation._run", lambda cmd: calls.append(cmd))
+
+    result = apply_orientation(clip, _quadra_com_orientation("horizontal"))
+    assert result == clip
+    assert calls == []  # já é 16:9, sem reencode
+
+
+def test_apply_orientation_crops_landscape_to_vertical(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    monkeypatch.setattr("integrations.orientation.probe_resolution", lambda path: (1280, 960))
+
+    calls = []
+    monkeypatch.setattr("integrations.orientation._run", lambda cmd: calls.append(cmd))
+
+    result = apply_orientation(clip, _quadra_com_orientation("vertical"))
+    assert result.name == "loc1-quadra1_20260917140000_oriented.mp4"
+    assert len(calls) == 1
+    assert "crop=540:960" in calls[0]  # 960 * 9/16 = 540, altura mantida
+
+
+def test_apply_orientation_crops_4_3_to_horizontal_16_9(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    monkeypatch.setattr("integrations.orientation.probe_resolution", lambda path: (1280, 960))
+
+    calls = []
+    monkeypatch.setattr("integrations.orientation._run", lambda cmd: calls.append(cmd))
+
+    result = apply_orientation(clip, _quadra_com_orientation("horizontal"))
+    assert result.name == "loc1-quadra1_20260917140000_oriented.mp4"
+    assert "crop=1280:720" in calls[0]  # 1280 / 16*9 = 720, largura mantida
+
+
+def test_apply_orientation_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    monkeypatch.setattr("integrations.orientation.probe_resolution", lambda path: (1280, 960))
+
+    def _boom(cmd):
+        raise OrientationApplicationError("ffmpeg explodiu")
+
+    monkeypatch.setattr("integrations.orientation._run", _boom)
+
+    with pytest.raises(OrientationApplicationError):
+        apply_orientation(clip, _quadra_com_orientation("vertical"))
+
+    assert not (tmp_path / "loc1-quadra1_20260917140000_oriented.mp4").exists()

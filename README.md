@@ -80,7 +80,7 @@ variável de ambiente (ver `api/config.py`):
 | | Variável | Default | O que tem | Ciclo de vida |
 |---|---|---|---|---|
 | **Buffer bruto** | `BUFFER_ROOT` | `/var/replay` | Segmentos de 2s contínuos, um subdiretório por `quadra_id` (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) | Descartável — retenção fixa de **2 minutos**, nada mais (`scripts/cleanup_segments.sh`, default `max_age_min=2`). Em produção fica em **tmpfs** (RAM), não em disco. |
-| **Clipes finais** | `OUTPUT_DIR` | `/var/replay/output` | Um arquivo por evento de replay: `<quadra_id>_<timestamp>.mp4` (e `<...>_overlay.mp4` quando o worker do Lara já aplicou a logo) | Persistente, em disco de verdade. Retenção local de `LOCAL_RAW_RETENTION_DAYS` dias (default 3, `scripts/local_retention_loop.py`, checa a cada 1h) — **não é a entrega oficial ao sócio** (essa é do Lara, 7 dias); é só pra essa página de teste interna e pros endpoints `/api/replays/...` não crescerem sem limite. |
+| **Clipes finais** | `OUTPUT_DIR` | `/var/replay/output` | Um arquivo por evento de replay: `<quadra_id>_<timestamp>.mp4` (e `<...>_oriented.mp4`/`_overlay.mp4`/`_oriented_overlay.mp4` quando o worker do Lara já processou orientação e/ou logo, ver `Replay.arquivo_processado`) | Persistente, em disco de verdade. Retenção local de `LOCAL_RAW_RETENTION_DAYS` dias (default 3, `scripts/local_retention_loop.py`, checa a cada 1h) — **não é a entrega oficial ao sócio** (essa é do Lara, 7 dias); é só pra essa página de teste interna e pros endpoints `/api/replays/...` não crescerem sem limite. |
 
 O `OUTPUT_DIR` é montado pela API em `/clips` (via `StaticFiles`), então
 todo clipe final já sai acessível publicamente em:
@@ -320,7 +320,10 @@ capture/
   capture_camera.sh     -> Captura contínua de UMA câmera (buffer em segmentos)
 clipper/
   clip_generator.py     -> Corte dos últimos N segundos, com proteção contra
-                            o segmento ainda sendo escrito (race condition)
+                            o segmento ainda sendo escrito (race condition).
+                            Também expõe probe_duration_seconds/probe_resolution
+                            (ffprobe), reusados por integrations/orientation.py
+                            e integrations/overlay.py
 db/
   engine.py             -> Engine SQLite (modo WAL) + sessão (PT-01)
   models.py             -> Local, Esporte, Quadra (PT-10, com espelho local da
@@ -341,10 +344,13 @@ integrations/
                             HTTP num tipo de erro próprio
   config_sync.py         -> Pull de GET /cameras com cache por config_hash;
                             baixa overlay novo e atualiza Quadra
+  orientation.py         -> Aplica (nunca decide) a orientação pedida pelo
+                            Lara, via crop centralizado (ffmpeg)
   overlay.py             -> Aplica (nunca decide) o overlay em cache no clipe,
                             via ffmpeg, escalando pro tamanho real do vídeo
-  upload_queue.py        -> Processa Replay pendente: aplica overlay, envia
-                            ao Lara, idempotente por external_id do clipe
+  upload_queue.py        -> Processa Replay pendente: aplica orientação e
+                            depois overlay, envia ao Lara, idempotente por
+                            external_id do clipe
   heartbeat.py           -> Heartbeat periódico por câmera; falha só loga
 config/
   cameras.json          -> Registro central de câmeras (fonte única de verdade;
@@ -379,8 +385,9 @@ test/
   test_reconcile.py        -> pytest: reconciliação disco->banco (PT-03)
   test_local_retention.py  -> pytest: retenção local dos clipes finais (S3)
   test_lara_integration.py -> pytest: cliente do Lara (mapeamento de erro),
-                                cache por config_hash, fila de envio (com backoff),
-                                overlay
+                                cache por config_hash, fila de envio (com
+                                backoff, inclusive de falha local de
+                                ffmpeg), orientação (crop), overlay
   run_pipeline_test.sh     -> Testa capture + clipper direto (sem API, sem câmera real)
   run_api_test.sh          -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
 start.sh                  -> Sobe venv/deps, carrega .env, roda os testes padrão e
@@ -395,6 +402,22 @@ logomarca) e o repositório de entrega do clipe ao sócio. Este repositório
 nunca decide nenhuma dessas três coisas — só consulta, aplica
 mecanicamente e envia. Detalhes de arquitetura e requisitos em
 `PLANO_DE_ACAO.md` (seção 6) e `PLANEJAMENTO.md`.
+
+**Aplicação mecânica no worker de fila (`integrations/upload_queue.py`),
+nessa ordem, antes do envio:**
+1. **Orientação** (`integrations/orientation.py`) — corta centralizado
+   pro aspect ratio pedido (`orientation: "vertical"` = 9:16,
+   `"horizontal"` = 16:9), a partir do que a câmera entrega. Sem
+   reencode se a câmera já entregar nativamente o aspect ratio pedido
+   (dentro de 1% de tolerância) ou se `orientation` ainda não tiver
+   sido sincronizada.
+2. **Overlay** (`integrations/overlay.py`) — queima a logo em cima do
+   resultado da orientação (não do bruto), escalando pro tamanho real
+   já cortado.
+
+O arquivo final (se algum dos dois mudou algo) fica em
+`Replay.arquivo_processado` — é o que `/api/replays/{id}/media` prefere
+servir, e o que é enviado ao Lara.
 
 Variáveis de ambiente novas (sem default de propósito para as duas
 primeiras — são endereço/credencial de outro sistema):
@@ -642,8 +665,9 @@ acelerar esse reencode de jeito nenhum, nem encaixando uma GPU dedicada
    `Local`/`Esporte`/`Quadra` migrados de `cameras.json` (PT-10), `Replay`
    registrado a cada acionamento (PT-02) e reconciliado com o disco a cada
    start da API (PT-03). Integração com o Lara (PT-14/PT-15: pull de
-   configuração, aplicação de overlay, envio do clipe, heartbeat,
-   diagnóstico) substituiu o pacote de cadastro/hierarquia de logo local —
+   configuração, aplicação de orientação e overlay, envio do clipe,
+   heartbeat, diagnóstico) substituiu o pacote de cadastro/hierarquia de
+   logo local —
    não existe mais entidade `Logo` neste projeto, ver seção "Integração
    com o Lara" abaixo. `GET /api/replays/{replay_id}`, `.../media` e
    `GET /api/quadras/{quadra_id}/replays` (M5/M6/M7, PT-04/PT-05/PT-06)

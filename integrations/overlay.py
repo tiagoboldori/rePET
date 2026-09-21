@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from clipper.clip_generator import probe_resolution
 from db.models import Quadra
 
 
@@ -24,22 +25,6 @@ def _run(cmd: list[str]) -> None:
         raise OverlayApplicationError(
             f"Comando falhou ({' '.join(cmd)}):\n{result.stderr}"
         )
-
-
-def probe_resolution(path: Path) -> tuple[int, int]:
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=s=x:p=0",
-            str(path),
-        ],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise OverlayApplicationError(f"ffprobe falhou pra {path}:\n{result.stderr}")
-    width_str, height_str = result.stdout.strip().split("x")
-    return int(width_str), int(height_str)
 
 
 def apply_overlay(clip_path: Path, quadra: Quadra) -> Path:

@@ -66,7 +66,12 @@ class Replay(SQLModel, table=True):
     id: str = Field(primary_key=True)
     quadra_id: str = Field(foreign_key="quadra.id")
     arquivo_bruto: str
-    arquivo_com_overlay: str | None = Field(default=None)
+    # Versão final servida/enviada, se diferente do bruto — orientação
+    # (crop, integrations/orientation.py) e/ou overlay
+    # (integrations/upload_queue.py) aplicados, nessa ordem. `None`
+    # enquanto nenhum dos dois se aplicar (caso comum: sem overlay
+    # configurado e câmera já no aspect ratio pedido pelo Lara).
+    arquivo_processado: str | None = Field(default=None)
     criado_em: datetime = Field(default_factory=datetime.now)
     duracao_segundos: float
     tamanho_bytes: int

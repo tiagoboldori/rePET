@@ -99,7 +99,7 @@ def test_create_tables_and_roundtrip(tmp_path):
         "loc1-quadra1_20260917140000",
     ]
     assert all(r.lara_status == ReplayLaraStatus.PENDENTE for r in replays)
-    assert all(r.arquivo_com_overlay is None for r in replays)
+    assert all(r.arquivo_processado is None for r in replays)
 
 
 def test_replay_requires_existing_quadra(tmp_path):

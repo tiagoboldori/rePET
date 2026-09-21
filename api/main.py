@@ -206,23 +206,25 @@ def get_replay(replay_id: str, session: Session = Depends(get_session)):
 @app.get("/api/replays/{replay_id}/media")
 def get_replay_media(replay_id: str, session: Session = Depends(get_session)):
     """M6 (PT-05): entrega do vídeo em si, endereçado por replay_id (não
-    pelo nome do arquivo). Prefere `arquivo_com_overlay` quando o worker
-    do Lara já aplicou a logo; cai pro `arquivo_bruto` senão — mesma regra
-    de preferência do envio ao Lara (integrations/upload_queue.py).
+    pelo nome do arquivo). Prefere `arquivo_processado` (orientação
+    recortada e/ou logo queimada, ver integrations/orientation.py e
+    integrations/overlay.py) quando o worker do Lara já processou o
+    clipe; cai pro `arquivo_bruto` senão — mesma regra de preferência do
+    envio ao Lara (integrations/upload_queue.py).
 
     `FileResponse` do Starlette já implementa requisições parciais
     (`Range`/206, `Accept-Ranges`, `ETag`) nativamente — RNF1 sem código
     extra aqui. `max-age` curto (1h) em vez de `immutable`: o arquivo
-    servido para um dado replay_id pode trocar (de bruto pra
-    com-overlay) pouco depois da criação, quando o worker do Lara aplica
-    a logo — mas o ETag muda junto (baseado em mtime+tamanho do arquivo
+    servido para um dado replay_id pode trocar (de bruto pro processado)
+    pouco depois da criação, quando o worker do Lara aplica orientação/
+    overlay — mas o ETag muda junto (baseado em mtime+tamanho do arquivo
     real), então um cache mais agressivo não serviria conteúdo velho
     depois de expirar."""
     replay = session.get(Replay, replay_id)
     if replay is None:
         raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
 
-    filename = replay.arquivo_com_overlay or replay.arquivo_bruto
+    filename = replay.arquivo_processado or replay.arquivo_bruto
     path = config.OUTPUT_DIR / filename
     if not path.is_file():
         raise HTTPException(
@@ -282,15 +284,16 @@ def delete_replay(
     session: Session = Depends(get_session),
     _admin: None = Depends(require_admin),
 ):
-    """M8 (PT-07): remove o registro e os arquivos (bruto e com overlay,
-    se houver) de um replay. Única medida de moderação disponível — o
-    conteúdo é público e sem controle de acesso na visualização (M11:
-    protegido por HTTP Basic, ao contrário de M5/M6/M7)."""
+    """M8 (PT-07): remove o registro e os arquivos (bruto e processado —
+    orientação e/ou overlay —, se houver) de um replay. Única medida de
+    moderação disponível — o conteúdo é público e sem controle de acesso
+    na visualização (M11: protegido por HTTP Basic, ao contrário de
+    M5/M6/M7)."""
     replay = session.get(Replay, replay_id)
     if replay is None:
         raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
 
-    for filename in {replay.arquivo_bruto, replay.arquivo_com_overlay}:
+    for filename in {replay.arquivo_bruto, replay.arquivo_processado}:
         if filename:
             (config.OUTPUT_DIR / filename).unlink(missing_ok=True)
 
@@ -305,11 +308,11 @@ def list_replays(quadra_id: str, session: Session = Depends(get_session)):
     quadra, mais recente primeiro. Lê da tabela `Replay` (existe desde
     PT-01/PT-02) em vez de fazer glob direto em OUTPUT_DIR — usar glob
     por prefixo `{quadra_id}_*.mp4` listava CADA replay DUAS VEZES assim
-    que o worker do Lara aplicasse overlay, porque `loc1-quadra1_<ts>.mp4`
-    (bruto) e `loc1-quadra1_<ts>_overlay.mp4` (com overlay) casavam os
-    dois com o mesmo padrão. Cada `<video>` aponta pra
+    que o worker do Lara processasse o clipe, porque `loc1-quadra1_<ts>.mp4`
+    (bruto) e `loc1-quadra1_<ts>_oriented.mp4`/`_overlay.mp4` (processado)
+    casavam os dois com o mesmo padrão. Cada `<video>` aponta pra
     `/api/replays/{id}/media`, que já resolve sozinho qual arquivo servir
-    (overlay se houver, senão o bruto — mesma regra de
+    (processado se houver, senão o bruto — mesma regra de
     integrations/upload_queue.py)."""
     cameras = config.load_cameras()
     if quadra_id not in cameras:

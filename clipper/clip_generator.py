@@ -133,6 +133,26 @@ def probe_duration_seconds(path: Path) -> float:
     return float(result.stdout.strip())
 
 
+def probe_resolution(path: Path) -> tuple[int, int]:
+    """Resolução (largura, altura) real de um vídeo, via ffprobe. Usado
+    tanto pra aplicar overlay (integrations/overlay.py) quanto pra decidir
+    o crop de orientação (integrations/orientation.py) — utilitário
+    compartilhado, não é específico de nenhum dos dois."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+            str(path),
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise ClipGenerationError(f"ffprobe falhou pra {path}:\n{result.stderr}")
+    width_str, height_str = result.stdout.strip().split("x")
+    return int(width_str), int(height_str)
+
+
 def generate_clip(
     quadra_id: str,
     buffer_root: Path,

@@ -34,7 +34,7 @@ def purge_expired_replays(session: Session, output_dir: Path, retention_days: fl
 
     expirados = session.exec(select(Replay).where(Replay.criado_em < cutoff)).all()
     for replay in expirados:
-        for filename in {replay.arquivo_bruto, replay.arquivo_com_overlay}:
+        for filename in {replay.arquivo_bruto, replay.arquivo_processado}:
             if filename:
                 (output_dir / filename).unlink(missing_ok=True)
         session.delete(replay)
