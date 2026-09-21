@@ -300,10 +300,17 @@ def delete_replay(
 
 
 @app.get("/quadra/{quadra_id}", response_class=HTMLResponse)
-def list_replays(quadra_id: str):
+def list_replays(quadra_id: str, session: Session = Depends(get_session)):
     """Página pública (sem login) listando os replays já cortados dessa
-    quadra, mais recente primeiro. Lê direto do disco — não depende de
-    Postgres (ainda não existe)."""
+    quadra, mais recente primeiro. Lê da tabela `Replay` (existe desde
+    PT-01/PT-02) em vez de fazer glob direto em OUTPUT_DIR — usar glob
+    por prefixo `{quadra_id}_*.mp4` listava CADA replay DUAS VEZES assim
+    que o worker do Lara aplicasse overlay, porque `loc1-quadra1_<ts>.mp4`
+    (bruto) e `loc1-quadra1_<ts>_overlay.mp4` (com overlay) casavam os
+    dois com o mesmo padrão. Cada `<video>` aponta pra
+    `/api/replays/{id}/media`, que já resolve sozinho qual arquivo servir
+    (overlay se houver, senão o bruto — mesma regra de
+    integrations/upload_queue.py)."""
     cameras = config.load_cameras()
     if quadra_id not in cameras:
         raise HTTPException(
@@ -314,15 +321,13 @@ def list_replays(quadra_id: str):
             ),
         )
 
-    clips = sorted(
-        config.OUTPUT_DIR.glob(f"{quadra_id}_*.mp4"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    replays = session.exec(
+        select(Replay).where(Replay.quadra_id == quadra_id).order_by(Replay.criado_em.desc())
+    ).all()
     items = "".join(
-        f"<li><video controls preload='metadata' src='/clips/{p.name}'></video>"
-        f"<p>{p.name}</p></li>"
-        for p in clips
+        f"<li><video controls preload='metadata' src='/api/replays/{r.id}/media'></video>"
+        f"<p>{r.id}</p></li>"
+        for r in replays
     ) or "<li>Nenhum replay ainda.</li>"
 
     nome = cameras[quadra_id]["nome"]

@@ -140,6 +140,20 @@ echo "OK: total=2, página 1 traz o replay mais recente primeiro"
 echo "== 15.1) GET /api/quadras/{quadra_id}/replays de quadra desconhecida (deve dar 404) =="
 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:8123/api/quadras/quadra-que-nao-existe/replays"
 
+echo "== 15.2) GET /quadra/{quadra_id} — página pública, cada replay em 1 <li> só (não 2) =="
+curl -sf "http://127.0.0.1:8123/quadra/${QUADRA_ID}" -o /tmp/replay-api-test/quadra_page.html
+# marcador de 1 item = o <p>...</p> com o id (o id também aparece dentro do
+# <video src=...>, então contar ocorrências soltas do id daria falso
+# positivo mesmo sem bug de duplicação — o item da lista é que não pode duplicar)
+COUNT_LI_TOTAL=$(grep -o "<li>" /tmp/replay-api-test/quadra_page.html | wc -l)
+COUNT_REPLAY_1=$(grep -o "<p>${REPLAY_ID}</p>" /tmp/replay-api-test/quadra_page.html | wc -l)
+COUNT_REPLAY_2=$(grep -o "<p>${REPLAY_ID_2}</p>" /tmp/replay-api-test/quadra_page.html | wc -l)
+if [[ "$COUNT_LI_TOTAL" != "2" || "$COUNT_REPLAY_1" != "1" || "$COUNT_REPLAY_2" != "1" ]]; then
+    echo "FALHOU: esperava 2 <li> no total (1 por replay), achou ${COUNT_LI_TOTAL} <li>, ${COUNT_REPLAY_1}x o replay 1 e ${COUNT_REPLAY_2}x o replay 2" >&2
+    exit 1
+fi
+echo "OK: 2 replays, 2 <li> — um item por replay, sem duplicata"
+
 echo "== 16) DELETE /api/replays/{replay_id} — sem credencial (deve dar 401) =="
 curl -s -o /dev/null -w "HTTP %{http_code}\n" -X DELETE "http://127.0.0.1:8123/api/replays/${REPLAY_ID_2}"
 
