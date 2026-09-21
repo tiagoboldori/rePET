@@ -80,6 +80,12 @@ def _process_one(
         session.commit()
         return
 
+    # Número desta tentativa (pro log — prompt do Lara: "log claro de cada
+    # envio: external_id do clipe, resposta e tentativa"). Capturado antes
+    # de qualquer mutação de lara_tentativas abaixo (sucesso e falha
+    # definitiva zeram o contador), pra sempre logar o número certo.
+    tentativa_atual = replay.lara_tentativas + 1
+
     try:
         send_path = apply_orientation(clip_path, quadra)
         if send_path != clip_path:
@@ -108,7 +114,7 @@ def _process_one(
         # mas RNF9 pede o mesmo tratamento: logar e retentar, nunca travar
         # a fila nem impedir a disponibilidade local do replay já gerado.
         _apply_backoff(replay, exc)
-        print(f"[lara] processamento local de '{replay.id}' falhou (tentativa {replay.lara_tentativas}, retentável): {exc}")
+        print(f"[lara] processamento local de '{replay.id}' falhou (tentativa {tentativa_atual}, retentável): {exc}")
     except (LaraValidationError, LaraPayloadTooLargeError) as exc:
         # não é transitório — retentar não resolve (RNF9: o replay já está
         # disponível localmente, isso só afeta a entrega via Lara)
@@ -116,7 +122,7 @@ def _process_one(
         replay.lara_ultimo_erro = str(exc)
         replay.lara_tentativas = 0
         replay.lara_proxima_tentativa_em = None
-        print(f"[lara] envio de '{replay.id}' falhou (não retentável): {exc}")
+        print(f"[lara] envio de '{replay.id}' falhou (tentativa {tentativa_atual}, não retentável): {exc}")
     except LaraNotFoundError as exc:
         # provável external_id de câmera ainda não cadastrado no Lara —
         # fica PENDENTE, com o mesmo backoff dos erros transitórios abaixo
@@ -124,14 +130,14 @@ def _process_one(
         # poucos segundos enquanto o cadastro não sai)
         _apply_backoff(replay, exc)
         print(
-            f"[lara] envio de '{replay.id}' com 404 (tentativa {replay.lara_tentativas}) "
+            f"[lara] envio de '{replay.id}' com 404 (tentativa {tentativa_atual}) "
             f"— conferir cadastro no Lara: {exc}"
         )
     except (LaraAuthError, LaraRateLimitError, LaraServerError, LaraClientError) as exc:
         # transitório (token, rede, 429, 5xx) — fica PENDENTE, retentado só
         # depois do backoff (ver _apply_backoff)
         _apply_backoff(replay, exc)
-        print(f"[lara] envio de '{replay.id}' falhou (tentativa {replay.lara_tentativas}, retentável): {exc}")
+        print(f"[lara] envio de '{replay.id}' falhou (tentativa {tentativa_atual}, retentável): {exc}")
     else:
         replay.lara_status = ReplayLaraStatus.ENVIADO
         replay.lara_uuid = result.uuid
@@ -139,7 +145,10 @@ def _process_one(
         replay.lara_ultimo_erro = None
         replay.lara_tentativas = 0
         replay.lara_proxima_tentativa_em = None
-        print(f"[lara] envio de '{replay.id}' confirmado (uuid={result.uuid}, duplicated={result.duplicated}).")
+        print(
+            f"[lara] envio de '{replay.id}' confirmado na tentativa {tentativa_atual} "
+            f"(uuid={result.uuid}, duplicated={result.duplicated})."
+        )
 
     session.add(replay)
     session.commit()
