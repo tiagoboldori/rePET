@@ -18,6 +18,8 @@ export CAMERAS_FILE="${ROOT}/config/cameras.json"
 export DATABASE_URL="sqlite:///${WORKDIR}/repet_test.db"
 export CLIP_DURATION_SECONDS=35
 export SEGMENT_TIME=2
+export ADMIN_USERNAME=admin-teste
+export ADMIN_PASSWORD=senha-teste
 
 rm -rf "$WORKDIR"
 mkdir -p "$BUFFER_ROOT" "$OUTPUT_DIR"
@@ -114,5 +116,52 @@ if [[ "$PARTIAL_SIZE" != "100" ]]; then
     exit 1
 fi
 echo "OK: corpo parcial com 100 bytes"
+
+echo "== 14) Esperando o cooldown (${QUADRA_ID}) pra acionar um 2º replay, pra testar paginação =="
+sleep 16
+curl -s -o /tmp/replay-api-test/resp_ok2.json -w "HTTP %{http_code}\n" \
+    -X POST "http://127.0.0.1:8123/replay/${QUADRA_ID}"
+cat /tmp/replay-api-test/resp_ok2.json; echo
+REPLAY_ID_2=$(python3 -c "import json;print(json.load(open('/tmp/replay-api-test/resp_ok2.json'))['clip_filename'])" | sed 's/\.mp4$//')
+
+echo "== 15) GET /api/quadras/{quadra_id}/replays — listagem paginada (M7/PT-06) =="
+curl -sf "http://127.0.0.1:8123/api/quadras/${QUADRA_ID}/replays?page=1&page_size=1" \
+    | tee /tmp/replay-api-test/resp_page1.json; echo
+python3 -c "
+import json
+data = json.load(open('/tmp/replay-api-test/resp_page1.json'))
+assert data['total'] == 2, data
+assert data['page'] == 1 and data['page_size'] == 1, data
+assert len(data['items']) == 1, data
+assert data['items'][0]['id'] == '${REPLAY_ID_2}', data  # mais recente primeiro
+"
+echo "OK: total=2, página 1 traz o replay mais recente primeiro"
+
+echo "== 15.1) GET /api/quadras/{quadra_id}/replays de quadra desconhecida (deve dar 404) =="
+curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:8123/api/quadras/quadra-que-nao-existe/replays"
+
+echo "== 16) DELETE /api/replays/{replay_id} — sem credencial (deve dar 401) =="
+curl -s -o /dev/null -w "HTTP %{http_code}\n" -X DELETE "http://127.0.0.1:8123/api/replays/${REPLAY_ID_2}"
+
+echo "== 16.1) DELETE com credencial ERRADA (deve dar 401) =="
+curl -s -o /dev/null -w "HTTP %{http_code}\n" -X DELETE \
+    -u "admin-teste:senha-errada" "http://127.0.0.1:8123/api/replays/${REPLAY_ID_2}"
+
+echo "== 16.2) DELETE com credencial certa (M8/PT-07, deve dar 204) =="
+curl -s -o /dev/null -w "HTTP %{http_code}\n" -X DELETE \
+    -u "admin-teste:senha-teste" "http://127.0.0.1:8123/api/replays/${REPLAY_ID_2}"
+
+echo "== 16.3) Confirmando remoção: registro sumiu do banco, arquivo sumiu do disco, 404 na consulta =="
+COUNT_AFTER_DELETE=$(sqlite3 "${WORKDIR}/repet_test.db" "SELECT COUNT(*) FROM replay WHERE id = '${REPLAY_ID_2}';")
+if [[ "$COUNT_AFTER_DELETE" != "0" ]]; then
+    echo "FALHOU: replay '${REPLAY_ID_2}' ainda está no banco depois do DELETE" >&2
+    exit 1
+fi
+if [[ -f "${OUTPUT_DIR}/${REPLAY_ID_2}.mp4" ]]; then
+    echo "FALHOU: arquivo '${REPLAY_ID_2}.mp4' ainda está em disco depois do DELETE" >&2
+    exit 1
+fi
+curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:8123/api/replays/${REPLAY_ID_2}"
+echo "OK: registro removido do banco, arquivo removido do disco"
 
 echo "== OK: endpoint testado de ponta a ponta =="

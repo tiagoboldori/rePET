@@ -194,8 +194,9 @@ GET /clips/<arquivo>.mp4   -> serve o clipe final (StaticFiles sobre OUTPUT_DIR)
 GET /health                -> healthcheck simples
 ```
 
-Endpoints da API de consumo (M5/M6, `/api/...`, público — sem HTTP Basic,
-mesmo nível de acesso que `/quadra/{quadra_id}` e `/clips/*` já têm hoje):
+Endpoints da API de consumo (M5/M6/M7, `/api/...`, público — sem HTTP
+Basic, mesmo nível de acesso que `/quadra/{quadra_id}` e `/clips/*` já
+têm hoje):
 
 ```
 GET /api/replays/{replay_id}         -> metadados do replay pelo id (não
@@ -211,6 +212,32 @@ GET /api/replays/{replay_id}/media   -> entrega o vídeo em si. Prefere o
                                          Accept-Ranges, ETag) nativamente
                                          via FileResponse do Starlette —
                                          RNF1 sem código extra.
+GET /api/quadras/{quadra_id}/replays -> listagem paginada dos replays da
+                                         quadra, mais recente primeiro.
+                                         Query params `page` (default 1)
+                                         e `page_size` (default 20, teto
+                                         100). Resposta:
+                                         {quadra_id, page, page_size,
+                                          total, items: [...]}.
+                                         404 se quadra_id não existir.
+```
+
+Endpoint de gerenciamento (M8, protegido por HTTP Basic — M11):
+
+```
+DELETE /api/replays/{replay_id}      -> remove o registro e os arquivos
+                                         (bruto e com overlay, se houver)
+                                         de um replay. Única medida de
+                                         moderação disponível — o
+                                         conteúdo é público e sem
+                                         controle de acesso na
+                                         visualização. `401` sem
+                                         credencial válida (exige
+                                         ADMIN_USERNAME/ADMIN_PASSWORD
+                                         configurados — sem default,
+                                         ver tabela abaixo). `204` em
+                                         caso de sucesso, `404` se o
+                                         replay não existir.
 ```
 
 Variáveis de ambiente que a API lê (`api/config.py`), todas com default
@@ -226,6 +253,7 @@ razoável pra dev local:
 | `SAFETY_MARGIN` | `0.5` | Margem (segundos) pra considerar um segmento "fechado" |
 | `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~13s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
 | `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo entre dois acionamentos da MESMA quadra — uma segunda chamada antes disso recebe `429` em vez de disparar outro corte |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio (sem default de propósito) | Credencial HTTP Basic da superfície de gerenciamento (M11) — hoje só protege `DELETE /api/replays/{id}`. Sem configurar, o endpoint recusa toda requisição com `401` (nunca cai num usuário/senha padrão) |
 
 > **`DATABASE_URL` não está na tabela acima de propósito:** é lida direto
 > por `db/engine.py`, não por `api/config.py` — mesmo padrão que
@@ -523,13 +551,15 @@ acelerar esse reencode de jeito nenhum, nem encaixando uma GPU dedicada
    configuração, aplicação de overlay, envio do clipe, heartbeat,
    diagnóstico) substituiu o pacote de cadastro/hierarquia de logo local —
    não existe mais entidade `Logo` neste projeto, ver seção "Integração
-   com o Lara" abaixo. `GET /api/replays/{replay_id}` e
-   `.../media` (M5/M6, PT-04/PT-05) já expõem o replay por id. Falta:
-   `GET /api/quadras/{quadra_id}/replays` paginado (M7, PT-06) e
-   `DELETE /api/replays/{replay_id}` (M8, PT-07).
-6. ⬜ API de gerenciamento protegida por HTTP Basic (M11, PT-08) — só
-   endpoints JSON, sem página web (ver nota de escopo no topo do README).
-   Frontend/painel que consumir essa API é de outro projeto.
+   com o Lara" abaixo. `GET /api/replays/{replay_id}`, `.../media` e
+   `GET /api/quadras/{quadra_id}/replays` (M5/M6/M7, PT-04/PT-05/PT-06)
+   expõem o replay por id e por quadra (paginado). `DELETE
+   /api/replays/{replay_id}` (M8, PT-07) remove registro e arquivo.
+6. ✅ Autenticação HTTP Basic (M11, PT-08) protegendo o único endpoint de
+   gerenciamento existente hoje (o `DELETE` acima) —
+   `ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default. Só endpoints JSON, sem
+   página web (ver nota de escopo no topo do README). Frontend/painel que
+   consumir essa API é de outro projeto.
 7. 🔶 Limpeza do buffer (retenção fixa de 2min) — funcionando via
    `scripts/cleanup_loop.sh`, subido automaticamente pelo `start.sh`. Cron
    real de sistema (produção com systemd) ainda não instalado.

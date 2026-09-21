@@ -11,14 +11,17 @@ toda a informação necessária.
 Rodar localmente (dev):
     uvicorn api.main:app --reload --port 8000
 """
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
-from sqlmodel import Session
+from sqlalchemy import func
+from sqlmodel import Session, select
 
 from api import config
 from clipper.clip_generator import (
@@ -60,6 +63,42 @@ app.mount("/clips", StaticFiles(directory=str(config.OUTPUT_DIR)), name="clips")
 # de ffmpeg) rodando ao mesmo tempo pra mesma câmera.
 _last_trigger: dict[str, datetime] = {}
 _trigger_lock = threading.Lock()
+
+# --- Autenticação HTTP Basic da superfície de gerenciamento (M11) --------
+_admin_security = HTTPBasic()
+
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(_admin_security)) -> None:
+    """Dependência aplicada a endpoints de gerenciamento (hoje só o
+    DELETE abaixo). `secrets.compare_digest` evita vazar por timing se a
+    credencial está certa/errada. Sem ADMIN_USERNAME/ADMIN_PASSWORD
+    configurados, recusa toda requisição (deny by default, nunca um
+    usuário/senha padrão adivinhável)."""
+    configured = bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD)
+    user_ok = configured and secrets.compare_digest(credentials.username, config.ADMIN_USERNAME)
+    pass_ok = configured and secrets.compare_digest(credentials.password, config.ADMIN_PASSWORD)
+    if not (user_ok and pass_ok):
+        raise HTTPException(
+            status_code=401,
+            detail="Credencial inválida." if configured else (
+                "Autenticação de administrador não configurada "
+                "(ADMIN_USERNAME/ADMIN_PASSWORD)."
+            ),
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
+def _serialize_replay(replay: Replay) -> dict:
+    return {
+        "id": replay.id,
+        "quadra_id": replay.quadra_id,
+        "criado_em": replay.criado_em,
+        "duracao_segundos": replay.duracao_segundos,
+        "tamanho_bytes": replay.tamanho_bytes,
+        "media_url": f"/api/replays/{replay.id}/media",
+        "lara_status": replay.lara_status,
+        "lara_enviado_em": replay.lara_enviado_em,
+    }
 
 
 @app.post("/replay/{quadra_id}")
@@ -161,16 +200,7 @@ def get_replay(replay_id: str, session: Session = Depends(get_session)):
     if replay is None:
         raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
 
-    return {
-        "id": replay.id,
-        "quadra_id": replay.quadra_id,
-        "criado_em": replay.criado_em,
-        "duracao_segundos": replay.duracao_segundos,
-        "tamanho_bytes": replay.tamanho_bytes,
-        "media_url": f"/api/replays/{replay.id}/media",
-        "lara_status": replay.lara_status,
-        "lara_enviado_em": replay.lara_enviado_em,
-    }
+    return _serialize_replay(replay)
 
 
 @app.get("/api/replays/{replay_id}/media")
@@ -206,6 +236,67 @@ def get_replay_media(replay_id: str, session: Session = Depends(get_session)):
         filename=filename,
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@app.get("/api/quadras/{quadra_id}/replays")
+def list_quadra_replays(
+    quadra_id: str,
+    page: int = 1,
+    page_size: int = 20,
+    session: Session = Depends(get_session),
+):
+    """M7 (PT-06): listagem paginada dos replays de uma quadra, mais
+    recente primeiro, com total de itens (RNF2). Consumo público — mesma
+    justificativa do PLANO_DE_ACAO.md: usada tanto pela visualização
+    pública quanto pelo gerenciamento, não é endpoint de moderação."""
+    if session.get(Quadra, quadra_id) is None:
+        raise HTTPException(status_code=404, detail=f"quadra '{quadra_id}' não encontrada.")
+
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)  # limite máximo por página (RNF2)
+
+    total = session.exec(
+        select(func.count()).select_from(Replay).where(Replay.quadra_id == quadra_id)
+    ).one()
+
+    items = session.exec(
+        select(Replay)
+        .where(Replay.quadra_id == quadra_id)
+        .order_by(Replay.criado_em.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+
+    return {
+        "quadra_id": quadra_id,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "items": [_serialize_replay(r) for r in items],
+    }
+
+
+@app.delete("/api/replays/{replay_id}", status_code=204)
+def delete_replay(
+    replay_id: str,
+    session: Session = Depends(get_session),
+    _admin: None = Depends(require_admin),
+):
+    """M8 (PT-07): remove o registro e os arquivos (bruto e com overlay,
+    se houver) de um replay. Única medida de moderação disponível — o
+    conteúdo é público e sem controle de acesso na visualização (M11:
+    protegido por HTTP Basic, ao contrário de M5/M6/M7)."""
+    replay = session.get(Replay, replay_id)
+    if replay is None:
+        raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
+
+    for filename in {replay.arquivo_bruto, replay.arquivo_com_overlay}:
+        if filename:
+            (config.OUTPUT_DIR / filename).unlink(missing_ok=True)
+
+    session.delete(replay)
+    session.commit()
+    return None
 
 
 @app.get("/quadra/{quadra_id}", response_class=HTMLResponse)

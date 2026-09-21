@@ -66,6 +66,14 @@ LARA_UPLOAD_POLL_INTERVAL_SECONDS = float(
 # dias). Proposto 3 dias (S3/RNF5 do PLANO_DE_ACAO.md v3), a confirmar.
 LOCAL_RAW_RETENTION_DAYS = float(os.environ.get("LOCAL_RAW_RETENTION_DAYS", "3"))
 
+# --- Autenticação HTTP Basic da superfície de gerenciamento (M11) --------
+# Sem default de propósito, mesmo padrão de REPLAY_API_TOKEN — é
+# credencial, não algo pra inventar. Enquanto não configurado, os
+# endpoints de gerenciamento (hoje só DELETE /api/replays/{id}) recusam
+# toda requisição com 401 em vez de cair num usuário/senha padrão óbvio.
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
 
 def load_cameras() -> dict[str, dict]:
     """Carrega config/cameras.json e devolve um dict indexado por quadra_id,
