@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 
@@ -149,6 +149,63 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
         "clip_filename": clip_path.name,
         "clip_url": f"/clips/{clip_path.name}",
     }
+
+
+@app.get("/api/replays/{replay_id}")
+def get_replay(replay_id: str, session: Session = Depends(get_session)):
+    """M5 (PT-04): metadados de um replay pelo identificador, sem depender
+    do nome do arquivo. Consumo público — mesmo nível de acesso que
+    `GET /quadra/{quadra_id}` já dá pro conteúdo, só que endereçável por
+    id em vez de precisar listar a quadra inteira."""
+    replay = session.get(Replay, replay_id)
+    if replay is None:
+        raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
+
+    return {
+        "id": replay.id,
+        "quadra_id": replay.quadra_id,
+        "criado_em": replay.criado_em,
+        "duracao_segundos": replay.duracao_segundos,
+        "tamanho_bytes": replay.tamanho_bytes,
+        "media_url": f"/api/replays/{replay.id}/media",
+        "lara_status": replay.lara_status,
+        "lara_enviado_em": replay.lara_enviado_em,
+    }
+
+
+@app.get("/api/replays/{replay_id}/media")
+def get_replay_media(replay_id: str, session: Session = Depends(get_session)):
+    """M6 (PT-05): entrega do vídeo em si, endereçado por replay_id (não
+    pelo nome do arquivo). Prefere `arquivo_com_overlay` quando o worker
+    do Lara já aplicou a logo; cai pro `arquivo_bruto` senão — mesma regra
+    de preferência do envio ao Lara (integrations/upload_queue.py).
+
+    `FileResponse` do Starlette já implementa requisições parciais
+    (`Range`/206, `Accept-Ranges`, `ETag`) nativamente — RNF1 sem código
+    extra aqui. `max-age` curto (1h) em vez de `immutable`: o arquivo
+    servido para um dado replay_id pode trocar (de bruto pra
+    com-overlay) pouco depois da criação, quando o worker do Lara aplica
+    a logo — mas o ETag muda junto (baseado em mtime+tamanho do arquivo
+    real), então um cache mais agressivo não serviria conteúdo velho
+    depois de expirar."""
+    replay = session.get(Replay, replay_id)
+    if replay is None:
+        raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
+
+    filename = replay.arquivo_com_overlay or replay.arquivo_bruto
+    path = config.OUTPUT_DIR / filename
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"arquivo do replay '{replay_id}' não está mais em disco (retenção local já removeu?).",
+        )
+
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=filename,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.get("/quadra/{quadra_id}", response_class=HTMLResponse)

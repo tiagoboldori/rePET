@@ -80,4 +80,39 @@ echo "== 10) Validando que a quadra foi migrada de cameras.json pro banco (PT-10
 sqlite3 "${WORKDIR}/repet_test.db" \
     "SELECT q.id, q.nome, q.esporte_id, l.nome FROM quadra q JOIN local l ON l.id = q.local_id WHERE q.id = '${QUADRA_ID}';"
 
+echo "== 11) GET /api/replays/{replay_id} — metadados (M5/PT-04) =="
+curl -sf "http://127.0.0.1:8123/api/replays/${REPLAY_ID}" | tee /tmp/replay-api-test/resp_meta.json; echo
+python3 -c "
+import json
+meta = json.load(open('/tmp/replay-api-test/resp_meta.json'))
+assert meta['id'] == '${REPLAY_ID}', meta
+assert meta['quadra_id'] == '${QUADRA_ID}', meta
+assert meta['media_url'] == '/api/replays/${REPLAY_ID}/media', meta
+assert meta['lara_status'] == 'pendente', meta
+"
+
+echo "== 11.1) GET /api/replays/{replay_id} desconhecido (deve dar 404) =="
+curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:8123/api/replays/replay-que-nao-existe"
+
+echo "== 12) GET /api/replays/{replay_id}/media — download integral (M6/PT-05) =="
+curl -sf "http://127.0.0.1:8123/api/replays/${REPLAY_ID}/media" -o /tmp/replay-api-test/media_full.mp4
+cmp /tmp/replay-api-test/downloaded_clip.mp4 /tmp/replay-api-test/media_full.mp4 \
+    && echo "OK: conteúdo idêntico ao servido em /clips"
+
+echo "== 13) GET .../media com cabeçalho Range — requisição parcial (RNF1) =="
+curl -s -D /tmp/replay-api-test/range_headers.txt -o /tmp/replay-api-test/media_partial.mp4 \
+    -H "Range: bytes=0-99" "http://127.0.0.1:8123/api/replays/${REPLAY_ID}/media"
+head -n1 /tmp/replay-api-test/range_headers.txt
+grep -qi "^HTTP/.* 206" /tmp/replay-api-test/range_headers.txt \
+    && echo "OK: 206 Partial Content" \
+    || { echo "FALHOU: esperava 206 Partial Content"; cat /tmp/replay-api-test/range_headers.txt; exit 1; }
+grep -qi "^content-range:" /tmp/replay-api-test/range_headers.txt \
+    && echo "OK: Content-Range presente"
+PARTIAL_SIZE=$(stat -c%s /tmp/replay-api-test/media_partial.mp4)
+if [[ "$PARTIAL_SIZE" != "100" ]]; then
+    echo "FALHOU: esperava 100 bytes no corpo parcial, veio ${PARTIAL_SIZE}" >&2
+    exit 1
+fi
+echo "OK: corpo parcial com 100 bytes"
+
 echo "== OK: endpoint testado de ponta a ponta =="

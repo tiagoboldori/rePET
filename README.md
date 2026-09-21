@@ -194,6 +194,25 @@ GET /clips/<arquivo>.mp4   -> serve o clipe final (StaticFiles sobre OUTPUT_DIR)
 GET /health                -> healthcheck simples
 ```
 
+Endpoints da API de consumo (M5/M6, `/api/...`, público — sem HTTP Basic,
+mesmo nível de acesso que `/quadra/{quadra_id}` e `/clips/*` já têm hoje):
+
+```
+GET /api/replays/{replay_id}         -> metadados do replay pelo id (não
+                                         pelo nome do arquivo): quadra_id,
+                                         criado_em, duração, tamanho,
+                                         media_url, estado de envio ao
+                                         Lara. 404 se o id não existir.
+GET /api/replays/{replay_id}/media   -> entrega o vídeo em si. Prefere o
+                                         arquivo com overlay aplicado
+                                         (integrations/overlay.py) quando
+                                         já existir, senão o bruto. Suporta
+                                         requisições parciais (Range/206,
+                                         Accept-Ranges, ETag) nativamente
+                                         via FileResponse do Starlette —
+                                         RNF1 sem código extra.
+```
+
 Variáveis de ambiente que a API lê (`api/config.py`), todas com default
 razoável pra dev local:
 
@@ -498,13 +517,19 @@ acelerar esse reencode de jeito nenhum, nem encaixando uma GPU dedicada
    demais botões/locais.
 5. ✅ Persistência em SQLite (`db/`, ver `PLANEJAMENTO.md`/`PLANO_DE_ACAO.md`
    — decisão revisada de Postgres pra SQLite em 2026-09-17): modelos
-   `Local`/`Esporte`/`Quadra` migrados de `cameras.json` (PT-10) e `Replay`
-   registrado a cada acionamento (PT-02). Falta: endpoints `/api/...` que
-   exponham isso (M5-M8, D4-D6), worker assíncrono de logo (S1) e a própria
-   tabela `Logo` (PT-14).
-6. ⬜ API de gerenciamento (`/admin`, protegida por HTTP Basic no MVP) —
-   só endpoints JSON, sem página web (ver nota de escopo no topo do
-   README). Frontend/painel que consumir essa API é de outro projeto.
+   `Local`/`Esporte`/`Quadra` migrados de `cameras.json` (PT-10), `Replay`
+   registrado a cada acionamento (PT-02) e reconciliado com o disco a cada
+   start da API (PT-03). Integração com o Lara (PT-14/PT-15: pull de
+   configuração, aplicação de overlay, envio do clipe, heartbeat,
+   diagnóstico) substituiu o pacote de cadastro/hierarquia de logo local —
+   não existe mais entidade `Logo` neste projeto, ver seção "Integração
+   com o Lara" abaixo. `GET /api/replays/{replay_id}` e
+   `.../media` (M5/M6, PT-04/PT-05) já expõem o replay por id. Falta:
+   `GET /api/quadras/{quadra_id}/replays` paginado (M7, PT-06) e
+   `DELETE /api/replays/{replay_id}` (M8, PT-07).
+6. ⬜ API de gerenciamento protegida por HTTP Basic (M11, PT-08) — só
+   endpoints JSON, sem página web (ver nota de escopo no topo do README).
+   Frontend/painel que consumir essa API é de outro projeto.
 7. 🔶 Limpeza do buffer (retenção fixa de 2min) — funcionando via
    `scripts/cleanup_loop.sh`, subido automaticamente pelo `start.sh`. Cron
    real de sistema (produção com systemd) ainda não instalado.
