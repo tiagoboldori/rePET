@@ -137,7 +137,11 @@ elif ! check_no_foreign_duplicate "Retenção local" "-m scripts.local_retention
     :  # aviso já emitido, não sobe duplicata
 else
     info "Subindo retenção local dos clipes finais (LOCAL_RAW_RETENTION_DAYS) ..."
-    nohup "$PY" -m scripts.local_retention_loop >>"$LOG_DIR/local_retention.log" 2>&1 &
+    # -u: stdout/stderr sem buffer de bloco — sem isso, `print()` fica preso
+    # no buffer interno do processo (não é flush por linha quando a saída
+    # não é um TTY) e o log fica vazio por horas mesmo com atividade real
+    # acontecendo (achado numa investigação, 2026-09-22).
+    nohup "$PY" -u -m scripts.local_retention_loop >>"$LOG_DIR/local_retention.log" 2>&1 &
     echo $! > "$RETENTION_PID_FILE"
     sleep 1
     if kill -0 "$(cat "$RETENTION_PID_FILE")" 2>/dev/null; then
@@ -158,7 +162,11 @@ else
         :  # aviso já emitido, não sobe duplicata
     else
         info "Subindo worker do Lara (sync/upload/heartbeat) ..."
-        nohup "$PY" -m scripts.lara_worker >>"$LOG_DIR/lara_worker.log" 2>&1 &
+        # -u: idem retenção local acima — sem isso o log de envio/erro do
+        # Lara (upload_queue.py, config_sync.py, heartbeat.py, todos via
+        # print()) fica preso no buffer, mascarando falhas reais que já
+        # estão acontecendo (registradas no banco, mas invisíveis no log).
+        nohup "$PY" -u -m scripts.lara_worker >>"$LOG_DIR/lara_worker.log" 2>&1 &
         echo $! > "$LARA_PID_FILE"
         sleep 1
         if kill -0 "$(cat "$LARA_PID_FILE")" 2>/dev/null; then
