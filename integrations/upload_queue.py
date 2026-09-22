@@ -1,9 +1,9 @@
 """
 upload_queue.py — fila de envio de clipes ao Lara (PT-15,
 PLANO_DE_ACAO.md v3 seção 6, itens 3-5). Processa `Replay` com
-`lara_status=PENDENTE`: aplica orientação (crop, mecânico, sem decisão,
-ver integrations/orientation.py), depois overlay (idem,
-integrations/overlay.py) e depois música de fundo (decisão LOCAL, não vem
+`lara_status=PENDENTE`: aplica orientação+overlay (mecânico, sem decisão,
+fundidos num só passe de ffmpeg quando os dois se aplicam — ver
+integrations/render.py) e depois música de fundo (decisão LOCAL, não vem
 do Lara — ver integrations/audio.py) em cima do resultado, então envia via
 `POST /cameras/{id}/videos`, idempotente por `external_id` do clipe
 (`Replay.id`, RNF11).
@@ -42,8 +42,7 @@ from integrations.lara_client import (
     LaraServerError,
     LaraValidationError,
 )
-from integrations.orientation import OrientationApplicationError, apply_orientation
-from integrations.overlay import OverlayApplicationError, apply_overlay
+from integrations.render import RenderApplicationError, render_clip
 
 # Backoff exponencial por item: 10s, 20s, 40s, ... até o teto de 10min.
 # Zerado em sucesso ou falha definitiva (ver _process_one).
@@ -102,26 +101,17 @@ def _process_one(
     tentativa_atual = replay.lara_tentativas + 1
 
     try:
-        send_path = apply_orientation(clip_path, quadra)
+        send_path = render_clip(clip_path, quadra)
         if send_path != clip_path:
-            replay.arquivo_processado = send_path.name
-
-        overlaid_path = apply_overlay(send_path, quadra)
-        if overlaid_path != send_path:
-            # o intermediário só-orientado deixou de ser o arquivo_processado
-            # atual — apaga pra não virar órfão em disco (nem reconcile nem
-            # local_retention sabem dele, só arquivo_bruto/arquivo_processado
-            # são rastreados)
-            if send_path != clip_path:
-                send_path.unlink(missing_ok=True)
-            send_path = overlaid_path
             replay.arquivo_processado = send_path.name
 
         audio_path = apply_audio(send_path, music_dir, music_volume, music_fade_seconds)
         if audio_path != send_path:
-            # mesmo raciocínio do intermediário só-orientado acima: o
-            # arquivo só-com-overlay (sem música) deixou de ser o
-            # arquivo_processado atual, não pode virar órfão em disco.
+            # o intermediário sem música (orientado/com overlay, se algum
+            # dos dois se aplicou) deixou de ser o arquivo_processado atual
+            # — apaga pra não virar órfão em disco (nem reconcile nem
+            # local_retention sabem dele, só arquivo_bruto/arquivo_processado
+            # são rastreados).
             if send_path != clip_path:
                 send_path.unlink(missing_ok=True)
             send_path = audio_path
@@ -135,8 +125,7 @@ def _process_one(
             clip_external_id=replay.id,
         )
     except (
-        OrientationApplicationError,
-        OverlayApplicationError,
+        RenderApplicationError,
         AudioApplicationError,
         ClipGenerationError,
     ) as exc:

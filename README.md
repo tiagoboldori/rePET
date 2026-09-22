@@ -404,14 +404,24 @@ integrations/
   config_sync.py         -> Pull de GET /cameras com cache por config_hash;
                             baixa overlay novo e atualiza Quadra
   orientation.py         -> Aplica (nunca decide) a orientação pedida pelo
-                            Lara, via crop centralizado (ffmpeg)
+                            Lara, via crop centralizado (ffmpeg). Expõe
+                            compute_crop()/orientation_applies() (decisão
+                            pura, sem ffmpeg), reusadas por render.py
   overlay.py             -> Aplica (nunca decide) o overlay em cache no clipe,
-                            via ffmpeg, escalando pro tamanho real do vídeo
+                            via ffmpeg, escalando pro tamanho real do vídeo.
+                            Expõe pick_overlay_path() (decisão pura),
+                            reusada por render.py
+  render.py              -> Orquestra orientation.py + overlay.py — funde os
+                            dois num único passe de ffmpeg (um decode, um
+                            encode) quando os dois se aplicam à mesma quadra,
+                            em vez de dois passes sequenciais (achado numa
+                            auditoria de CPU, 2026-09-22: é o caso comum em
+                            produção)
   audio.py               -> Mixa música de fundo (decisão LOCAL, não vem do
                             Lara) — sorteia uma faixa de assets/music/, corta
                             pra duração do clipe com fade in/out
-  upload_queue.py        -> Processa Replay pendente: aplica orientação,
-                            overlay e música, envia ao Lara, idempotente por
+  upload_queue.py        -> Processa Replay pendente: chama render.py e
+                            depois audio.py, envia ao Lara, idempotente por
                             external_id do clipe
   heartbeat.py           -> Heartbeat periódico por câmera; falha só loga
 assets/
@@ -472,16 +482,20 @@ mecanicamente e envia. Detalhes de arquitetura e requisitos em
 
 **Aplicação mecânica no worker de fila (`integrations/upload_queue.py`),
 nessa ordem, antes do envio:**
-1. **Orientação** (`integrations/orientation.py`) — corta centralizado
-   pro aspect ratio pedido (`orientation: "vertical"` = 9:16,
-   `"horizontal"` = 16:9), a partir do que a câmera entrega. Sem
-   reencode se a câmera já entregar nativamente o aspect ratio pedido
-   (dentro de 1% de tolerância) ou se `orientation` ainda não tiver
-   sido sincronizada.
-2. **Overlay** (`integrations/overlay.py`) — queima a logo em cima do
-   resultado da orientação (não do bruto), escalando pro tamanho real
-   já cortado.
-3. **Música de fundo** (`integrations/audio.py`) — decisão LOCAL, não vem
+1. **Orientação + overlay** (`integrations/render.py`, orquestra
+   `orientation.py`+`overlay.py`) — corta centralizado pro aspect ratio
+   pedido (`orientation: "vertical"` = 9:16, `"horizontal"` = 16:9) e
+   queima a logo em cima do resultado, escalando pro tamanho já cortado.
+   **Quando os dois se aplicam à mesma quadra — o caso comum em
+   produção — é UM SÓ passe de ffmpeg** (`crop`+`scale`+`overlay` num
+   único `filter_complex`, um decode e um encode), não dois passes
+   sequenciais (achado numa auditoria de CPU, 2026-09-22: câmeras reais
+   entregam 4:3 e a maioria das quadras tem overlay configurado, então o
+   caso "os dois se aplicam" não é exceção, é a regra). Sem reencode
+   algum se nenhum dos dois se aplica (câmera já entrega nativamente o
+   aspect ratio pedido, dentro de 1% de tolerância, e/ou quadra sem
+   overlay em cache).
+2. **Música de fundo** (`integrations/audio.py`) — decisão LOCAL, não vem
    do Lara (o contrato dele não tem campo de áudio): sorteia uma faixa
    de `MUSIC_DIR` (assets/music/, ver `assets/music/README.md`) e usa
    sempre o TRECHO INICIAL dela (0s até a duração do clipe — ex.: clipe

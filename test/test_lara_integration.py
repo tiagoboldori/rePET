@@ -33,6 +33,7 @@ from integrations.lara_client import (
 from integrations.audio import AudioApplicationError, apply_audio
 from integrations.orientation import OrientationApplicationError, apply_orientation
 from integrations.overlay import OverlayApplicationError, apply_overlay
+from integrations.render import RenderApplicationError, render_clip
 
 
 def _make_engine(tmp_path):
@@ -440,7 +441,7 @@ def test_process_pending_resets_backoff_on_success(tmp_path):
 
 def test_process_pending_applies_backoff_on_local_processing_failure(tmp_path, monkeypatch):
     """Achado numa auditoria: falha de processamento LOCAL (ffmpeg do
-    overlay/orientação, já visto na prática pelo menos uma vez em
+    render/orientação/overlay, já visto na prática pelo menos uma vez em
     produção) não era capturada em _process_one — propagava pra fora,
     travava o resto da passada da fila e nunca aplicava backoff (batia
     de novo a cada 10s pra sempre). RNF9 pede o mesmo tratamento de
@@ -452,9 +453,9 @@ def test_process_pending_applies_backoff_on_local_processing_failure(tmp_path, m
         _seed_pending_replay(session, output_dir)
 
         def _boom(clip_path, quadra):
-            raise OverlayApplicationError("ffmpeg explodiu (transitório)")
+            raise RenderApplicationError("ffmpeg explodiu (transitório)")
 
-        monkeypatch.setattr(upload_queue, "apply_overlay", _boom)
+        monkeypatch.setattr(upload_queue, "render_clip", _boom)
 
         client = _FakeLaraClientForSync()
         upload_queue.process_pending(session, client, output_dir)
@@ -467,11 +468,12 @@ def test_process_pending_applies_backoff_on_local_processing_failure(tmp_path, m
         assert len(client.upload_calls) == 0  # nem chegou a tentar enviar
 
 
-def test_process_pending_chains_orientation_then_overlay_and_cleans_intermediate(tmp_path, monkeypatch):
-    """orientation roda antes de overlay (overlay precisa aplicar na
-    resolução já cortada) e o intermediário só-orientado não pode
-    sobrar em disco órfão — nem reconcile nem local_retention sabem
-    dele, só arquivo_bruto/arquivo_processado são rastreados."""
+def test_process_pending_uses_render_clip_result_and_uploads_it(tmp_path, monkeypatch):
+    """upload_queue.py delega orientação+overlay inteiramente pro
+    render_clip (integrations/render.py) — a fusão dos dois num só passe
+    de ffmpeg quando ambos se aplicam é testada a parte, em nível de
+    render.py; aqui só importa que o resultado dele vira arquivo_processado
+    e é o que é enviado ao Lara."""
     engine = _make_engine(tmp_path)
     output_dir = tmp_path / "output"
     with Session(engine) as session:
@@ -479,19 +481,12 @@ def test_process_pending_chains_orientation_then_overlay_and_cleans_intermediate
         replay = _seed_pending_replay(session, output_dir)
         clip_path = output_dir / replay.arquivo_bruto
 
-        def _fake_orientation(path, quadra):
-            oriented = path.with_name(f"{path.stem}_oriented.mp4")
-            oriented.write_bytes(b"oriented")
-            return oriented
+        def _fake_render(path, quadra):
+            rendered = path.with_name(f"{path.stem}_oriented_overlay.mp4")
+            rendered.write_bytes(b"rendered")
+            return rendered
 
-        def _fake_overlay(path, quadra):
-            assert path.name.endswith("_oriented.mp4")  # recebeu a saída da orientação, não o bruto
-            overlaid = path.with_name(f"{path.stem}_overlay.mp4")
-            overlaid.write_bytes(b"overlaid")
-            return overlaid
-
-        monkeypatch.setattr(upload_queue, "apply_orientation", _fake_orientation)
-        monkeypatch.setattr(upload_queue, "apply_overlay", _fake_overlay)
+        monkeypatch.setattr(upload_queue, "render_clip", _fake_render)
 
         client = _FakeLaraClientForSync()
         upload_queue.process_pending(session, client, output_dir)
@@ -499,15 +494,13 @@ def test_process_pending_chains_orientation_then_overlay_and_cleans_intermediate
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.ENVIADO
         assert replay.arquivo_processado == f"{clip_path.stem}_oriented_overlay.mp4"
-        assert not (output_dir / f"{clip_path.stem}_oriented.mp4").exists()  # intermediário limpo
-        assert (output_dir / f"{clip_path.stem}_oriented_overlay.mp4").exists()  # final preservado
         assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_oriented_overlay.mp4"
 
 
-def test_process_pending_chains_audio_after_overlay_and_cleans_intermediate(tmp_path, monkeypatch):
-    """música é o último passo da cadeia (depois de orientação e overlay,
-    ver upload_queue.py) e o intermediário sem música não pode sobrar em
-    disco órfão — mesmo raciocínio do teste de orientation->overlay acima."""
+def test_process_pending_chains_audio_after_render_and_cleans_intermediate(tmp_path, monkeypatch):
+    """música é o último passo da cadeia (depois do render_clip, ver
+    upload_queue.py) e o intermediário sem música não pode sobrar em
+    disco órfão."""
     engine = _make_engine(tmp_path)
     output_dir = tmp_path / "output"
     music_dir = tmp_path / "music"
@@ -516,19 +509,19 @@ def test_process_pending_chains_audio_after_overlay_and_cleans_intermediate(tmp_
         replay = _seed_pending_replay(session, output_dir)
         clip_path = output_dir / replay.arquivo_bruto
 
-        def _fake_overlay(path, quadra):
-            overlaid = path.with_name(f"{path.stem}_overlay.mp4")
-            overlaid.write_bytes(b"overlaid")
-            return overlaid
+        def _fake_render(path, quadra):
+            rendered = path.with_name(f"{path.stem}_oriented_overlay.mp4")
+            rendered.write_bytes(b"rendered")
+            return rendered
 
         def _fake_audio(path, m_dir, volume, fade):
-            assert path.name.endswith("_overlay.mp4")  # recebeu a saída do overlay
+            assert path.name.endswith("_oriented_overlay.mp4")  # recebeu a saída do render
             assert m_dir == music_dir
             with_audio = path.with_name(f"{path.stem}_audio.mp4")
             with_audio.write_bytes(b"with audio")
             return with_audio
 
-        monkeypatch.setattr(upload_queue, "apply_overlay", _fake_overlay)
+        monkeypatch.setattr(upload_queue, "render_clip", _fake_render)
         monkeypatch.setattr(upload_queue, "apply_audio", _fake_audio)
 
         client = _FakeLaraClientForSync()
@@ -536,10 +529,10 @@ def test_process_pending_chains_audio_after_overlay_and_cleans_intermediate(tmp_
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.ENVIADO
-        assert replay.arquivo_processado == f"{clip_path.stem}_overlay_audio.mp4"
-        assert not (output_dir / f"{clip_path.stem}_overlay.mp4").exists()  # intermediário limpo
-        assert (output_dir / f"{clip_path.stem}_overlay_audio.mp4").exists()  # final preservado
-        assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_overlay_audio.mp4"
+        assert replay.arquivo_processado == f"{clip_path.stem}_oriented_overlay_audio.mp4"
+        assert not (output_dir / f"{clip_path.stem}_oriented_overlay.mp4").exists()  # intermediário limpo
+        assert (output_dir / f"{clip_path.stem}_oriented_overlay_audio.mp4").exists()  # final preservado
+        assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_oriented_overlay_audio.mp4"
 
 
 # --- heartbeat: falha não propaga ------------------------------------------
@@ -796,3 +789,146 @@ def test_apply_audio_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypatc
         apply_audio(clip, music_dir)
 
     assert not (tmp_path / "loc1-quadra1_20260917140000_audio.mp4").exists()
+
+
+# --- render: funde orientação+overlay num só passe quando os dois se aplicam
+
+
+def _quadra_render(orientation: str | None = None, overlay_png: Path | None = None) -> Quadra:
+    return Quadra(
+        id="loc1-quadra1", local_id="loc1", esporte_id="futsal",
+        nome="Quadra 1", input_url="rtsp://x", orientation=orientation,
+        overlay_png_path=str(overlay_png) if overlay_png else None,
+    )
+
+
+def test_render_clip_noop_when_neither_applies(tmp_path):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    assert render_clip(clip, _quadra_render()) == clip
+
+
+def test_render_clip_delegates_to_apply_orientation_when_only_crop_applies(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    monkeypatch.setattr("integrations.render.probe_resolution", lambda path: (1280, 960))
+
+    calls = []
+    monkeypatch.setattr(
+        "integrations.render.apply_orientation",
+        lambda path, quadra: calls.append("orientation") or path.with_name(f"{path.stem}_oriented.mp4"),
+    )
+    monkeypatch.setattr(
+        "integrations.render.apply_overlay",
+        lambda path, quadra: (_ for _ in ()).throw(AssertionError("não deveria chamar overlay")),
+    )
+
+    result = render_clip(clip, _quadra_render(orientation="horizontal"))
+    assert result.name == "loc1-quadra1_20260917140000_oriented.mp4"
+    assert calls == ["orientation"]
+
+
+def test_render_clip_delegates_to_apply_overlay_when_only_overlay_applies(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    png = tmp_path / "loc1-quadra1.png"
+    png.write_bytes(b"fake png")
+    monkeypatch.setattr("integrations.render.probe_resolution", lambda path: (1920, 1080))
+
+    calls = []
+    monkeypatch.setattr(
+        "integrations.render.apply_orientation",
+        lambda path, quadra: (_ for _ in ()).throw(AssertionError("não deveria chamar orientation")),
+    )
+    monkeypatch.setattr(
+        "integrations.render.apply_overlay",
+        lambda path, quadra: calls.append("overlay") or path.with_name(f"{path.stem}_overlay.mp4"),
+    )
+
+    result = render_clip(clip, _quadra_render(overlay_png=png))
+    assert result.name == "loc1-quadra1_20260917140000_overlay.mp4"
+    assert calls == ["overlay"]
+
+
+def test_render_clip_fuses_orientation_and_overlay_into_single_ffmpeg_pass(tmp_path, monkeypatch):
+    """O achado da auditoria de CPU (2026-09-22): câmera real entrega 4:3,
+    quadra pede 16:9 (crop) E tem overlay configurado — antes disso rodava
+    2 passes completos de decode+encode (orientation.py grava
+    _oriented.mp4, overlay.py lê e regrava _oriented_overlay.mp4); agora
+    é 1 passe só, com os dois filtros fundidos."""
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    png = tmp_path / "loc1-quadra1.png"
+    png.write_bytes(b"fake png")
+    monkeypatch.setattr("integrations.render.probe_resolution", lambda path: (1280, 960))
+
+    calls = []
+    monkeypatch.setattr("integrations.render._run", lambda cmd: calls.append(cmd))
+
+    result = render_clip(clip, _quadra_render(orientation="horizontal", overlay_png=png))
+    assert result.name == "loc1-quadra1_20260917140000_oriented_overlay.mp4"
+    assert len(calls) == 1  # um decode + um encode só, não dois passes separados
+    cmd = calls[0]
+    assert str(png) in cmd
+    filter_arg = cmd[cmd.index("-filter_complex") + 1]
+    assert "crop=1280:720" in filter_arg  # 1280/16*9 = 720
+    assert "scale=1280:720" in filter_arg  # overlay escala pro tamanho JÁ cortado
+    assert "overlay=0:0" in filter_arg
+
+
+def test_render_clip_combined_prefers_animated_overlay(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    animated = tmp_path / "loc1-quadra1.webm"
+    animated.write_bytes(b"fake webm")
+    quadra = Quadra(
+        id="loc1-quadra1", local_id="loc1", esporte_id="futsal",
+        nome="Quadra 1", input_url="rtsp://x", orientation="vertical",
+        overlay_animated_path=str(animated),
+    )
+    monkeypatch.setattr("integrations.render.probe_resolution", lambda path: (1280, 960))
+    calls = []
+    monkeypatch.setattr("integrations.render._run", lambda cmd: calls.append(cmd))
+
+    render_clip(clip, quadra)
+    cmd = calls[0]
+    assert "-stream_loop" in cmd
+    filter_arg = cmd[cmd.index("-filter_complex") + 1]
+    assert "shortest=1" in filter_arg
+
+
+def test_render_clip_wraps_delegated_errors_and_cleans_up(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    png = tmp_path / "loc1-quadra1.png"
+    png.write_bytes(b"fake png")
+    monkeypatch.setattr("integrations.render.probe_resolution", lambda path: (1280, 960))
+
+    def _boom(cmd):
+        raise RenderApplicationError("ffmpeg explodiu")
+
+    monkeypatch.setattr("integrations.render._run", _boom)
+
+    with pytest.raises(RenderApplicationError):
+        render_clip(clip, _quadra_render(orientation="horizontal", overlay_png=png))
+
+    assert not (tmp_path / "loc1-quadra1_20260917140000_oriented_overlay.mp4").exists()
+
+
+def test_render_clip_wraps_single_step_delegated_error(tmp_path, monkeypatch):
+    """render_clip devolve um único tipo de erro (RenderApplicationError)
+    pro chamador, mesmo quando a falha vem de dentro de apply_orientation
+    (que levanta OrientationApplicationError) — upload_queue.py não
+    precisa conhecer os tipos de erro internos de cada passo."""
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    monkeypatch.setattr("integrations.render.probe_resolution", lambda path: (1280, 960))
+    monkeypatch.setattr("integrations.orientation.probe_resolution", lambda path: (1280, 960))
+
+    def _boom(cmd):
+        raise OrientationApplicationError("ffmpeg explodiu na orientação")
+
+    monkeypatch.setattr("integrations.orientation._run", _boom)
+
+    with pytest.raises(RenderApplicationError, match="ffmpeg explodiu na orientação"):
+        render_clip(clip, _quadra_render(orientation="horizontal"))

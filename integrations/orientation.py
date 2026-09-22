@@ -34,6 +34,16 @@ class OrientationApplicationError(RuntimeError):
     pass
 
 
+def orientation_applies(orientation: str | None) -> bool:
+    """Decisão pura e barata (sem ffprobe): True só se `orientation` for
+    um valor reconhecido (vertical/horizontal). Usado por
+    `integrations/render.py` pra decidir se vale a pena sondar a
+    resolução do clipe — sem isso, `render_clip` chamaria `probe_resolution`
+    incondicionalmente, mesmo pra quadra sem orientação sincronizada
+    ainda (regressão real encontrada ao escrever os testes deste módulo)."""
+    return orientation in _TARGET_RATIO
+
+
 def _run(cmd: list[str]) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -47,6 +57,30 @@ def _even(value: float) -> int:
     return max(2, int(value) // 2 * 2)
 
 
+def compute_crop(width: int, height: int, orientation: str | None) -> tuple[int, int] | None:
+    """Decisão pura (sem ffmpeg): devolve o (crop_w, crop_h) a aplicar, ou
+    `None` se nada precisa mudar (orientação não sincronizada/desconhecida,
+    ou o frame já está dentro da tolerância do aspect ratio alvo). Extraído
+    de `apply_orientation` pra ser reutilizável por `integrations/render.py`
+    (fusão orientação+overlay num só passe de ffmpeg quando os dois se
+    aplicam, ver docstring de lá)."""
+    target_ratio = _TARGET_RATIO.get(orientation)
+    if target_ratio is None:
+        return None
+
+    current_ratio = width / height
+    diff = current_ratio - target_ratio
+
+    if abs(diff) <= _TOLERANCE:
+        return None
+    elif diff > 0:
+        # frame mais largo que o alvo -> corta as laterais, mantém altura
+        return _even(height * target_ratio), height
+    else:
+        # frame mais alto/estreito que o alvo -> corta topo/base, mantém largura
+        return width, _even(width / target_ratio)
+
+
 def apply_orientation(clip_path: Path, quadra: Quadra) -> Path:
     """Se a orientação da quadra ainda não foi sincronizada, for
     desconhecida, ou o clipe já está (dentro da tolerância) no aspect
@@ -54,22 +88,14 @@ def apply_orientation(clip_path: Path, quadra: Quadra) -> Path:
     comum quando a câmera já é nativamente do formato certo). Senão,
     corta centralizado pro aspect ratio alvo e devolve o novo arquivo
     (`<clip>_oriented.mp4`)."""
-    target_ratio = _TARGET_RATIO.get(quadra.orientation)
-    if target_ratio is None:
+    if not orientation_applies(quadra.orientation):
         return clip_path
 
     width, height = probe_resolution(clip_path)
-    current_ratio = width / height
-    diff = current_ratio - target_ratio
-
-    if abs(diff) <= _TOLERANCE:
+    crop = compute_crop(width, height, quadra.orientation)
+    if crop is None:
         return clip_path
-    elif diff > 0:
-        # frame mais largo que o alvo -> corta as laterais, mantém altura
-        crop_w, crop_h = _even(height * target_ratio), height
-    else:
-        # frame mais alto/estreito que o alvo -> corta topo/base, mantém largura
-        crop_w, crop_h = width, _even(width / target_ratio)
+    crop_w, crop_h = crop
 
     output_path = clip_path.with_name(f"{clip_path.stem}_oriented.mp4")
     cmd = [

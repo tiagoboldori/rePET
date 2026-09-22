@@ -27,20 +27,30 @@ def _run(cmd: list[str]) -> None:
         )
 
 
+def pick_overlay_path(quadra: Quadra) -> Path | None:
+    """Decisão pura (sem ffmpeg): devolve o arquivo de overlay a aplicar
+    (preferindo o animado, conforme o contrato do Lara), ou `None` se a
+    quadra não tem overlay em cache local. Extraído de `apply_overlay` pra
+    ser reutilizável por `integrations/render.py` (fusão orientação+overlay
+    num só passe de ffmpeg quando os dois se aplicam, ver docstring de lá)."""
+    animated = Path(quadra.overlay_animated_path) if quadra.overlay_animated_path else None
+    png = Path(quadra.overlay_png_path) if quadra.overlay_png_path else None
+
+    if animated is not None and animated.is_file():
+        return animated
+    if png is not None and png.is_file():
+        return png
+    return None
+
+
 def apply_overlay(clip_path: Path, quadra: Quadra) -> Path:
     """Se a quadra não tiver overlay em cache local, devolve `clip_path`
     sem tocar nele (sem reencode — caso comum). Senão, queima o overlay
     (preferindo o animado quando presente, conforme o contrato do Lara) e
     devolve o novo arquivo (`<clip>_overlay.mp4`). É o único ponto em que
     o corte volta a pagar reencode depois da otimização `-c copy`."""
-    animated = Path(quadra.overlay_animated_path) if quadra.overlay_animated_path else None
-    png = Path(quadra.overlay_png_path) if quadra.overlay_png_path else None
-
-    if animated is not None and animated.is_file():
-        overlay_path = animated
-    elif png is not None and png.is_file():
-        overlay_path = png
-    else:
+    overlay_path = pick_overlay_path(quadra)
+    if overlay_path is None:
         return clip_path
 
     width, height = probe_resolution(clip_path)
