@@ -322,7 +322,7 @@ cliente do Lara tende a ser — a confirmar na atualização do
 | Custo de CPU do reencode do overlay em servidor sem aceleração de hardware | Fila acumulada em horário de pico | Fila serializada; aceleração por hardware como otimização posterior (mesmo raciocínio da v2, agora aplicado ao overlay em vez da logo local) |
 | Câmera nova entregando HEVC em vez de H.264 | Clipe com problema de reprodução | Verificação com `ffprobe` no RTSP durante o cadastro |
 | `external_id` de câmera não cadastrado no Lara | Envio de clipe fica preso na fila (404 permanente) | Checklist de sincronização do cadastro de câmeras com o time do Lara antes de subir cada quadra nova |
-| Indisponibilidade ou alta latência do Lara | Fila de envio cresce; heartbeat falha | Cache local de configuração (config_hash) garante que o corte continua funcionando; fila com backoff absorve a indisponibilidade |
+| Indisponibilidade ou alta latência do Lara | Fila de envio cresce; heartbeat falha | Cache local de configuração (config_hash) garante que o corte continua funcionando; fila com backoff absorve a indisponibilidade. **Materializado em 2026-09-22:** `/api/replay/*` fora do ar no ambiente `192.168.100.48:8000` (rotas fora dessa base, ex. `/api/ping`, respondiam normal) — fila represou ~10-13 replays em `PENDENTE`, backoff absorveu sem travar o resto do sistema, conforme projetado. |
 | Banda do *backbone* da intranet | Perda de segmentos | Pendente de confirmação junto à infraestrutura |
 | Ponto único de falha no servidor central | Indisponibilidade simultânea nos quatro locais | Risco aceito na decisão de arquitetura |
 

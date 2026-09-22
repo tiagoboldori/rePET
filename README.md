@@ -263,14 +263,28 @@ GET /api/replays/{replay_id}         -> metadados do replay pelo id (não
                                          criado_em, duração, tamanho,
                                          media_url, estado de envio ao
                                          Lara. 404 se o id não existir.
-GET /api/replays/{replay_id}/media   -> entrega o vídeo em si. Prefere o
-                                         arquivo com overlay aplicado
-                                         (integrations/overlay.py) quando
-                                         já existir, senão o bruto. Suporta
-                                         requisições parciais (Range/206,
-                                         Accept-Ranges, ETag) nativamente
-                                         via FileResponse do Starlette —
-                                         RNF1 sem código extra.
+GET /api/replays/{replay_id}/media   -> entrega o vídeo em si. Prefere
+                                         Replay.arquivo_processado (saída
+                                         de integrations/render.py e/ou
+                                         audio.py — orientação, overlay
+                                         e/ou música) quando já existir,
+                                         senão o bruto. Suporta requisições
+                                         parciais (Range/206, Accept-Ranges,
+                                         ETag) nativamente via FileResponse
+                                         do Starlette — RNF1 sem código
+                                         extra. `Cache-Control: no-cache`
+                                         (não max-age): o arquivo servido
+                                         pra um replay_id troca pouco
+                                         depois da criação, quando o
+                                         processamento assíncrono termina —
+                                         com max-age o NAVEGADOR nem
+                                         reconsultava o servidor dentro da
+                                         janela, servindo o bruto em cache
+                                         por até 1h mesmo já processado
+                                         (bug real visto na prática,
+                                         2026-09-22, corrigido). no-cache
+                                         força revalidação via ETag a cada
+                                         carregamento (304 se não mudou).
 GET /api/quadras/{quadra_id}/replays -> listagem paginada dos replays da
                                          quadra, mais recente primeiro.
                                          Query params `page` (default 1)
@@ -555,6 +569,22 @@ tem seu próprio atraso exponencial (`lara_tentativas`/
 definitiva (422/413). Sem isso, uma indisponibilidade prolongada do Lara
 bateria nele a cada `LARA_UPLOAD_POLL_INTERVAL_SECONDS` pra cada replay
 pendente.
+
+**`recorded_at` sempre com offset explícito (corrigido em 2026-09-22).**
+`Replay.criado_em` vem de `datetime.now()` naive; o relógio do servidor é
+UTC (`Etc/UTC`), então o valor já É um instante UTC, só sem a marcação.
+`integrations/lara_client.py::upload_video` agora faz
+`recorded_at.replace(tzinfo=timezone.utc)` antes do `isoformat()`
+(produz `...+00:00`, inequívoco) — antes mandava a string sem offset, e
+um backend Laravel/Carbon tende a interpretar isso no timezone
+configurado da aplicação (aparentemente America/Sao_Paulo, UTC-3),
+deslocando o horário do clipe em ~3h no lado do Lara. **Mecanicamente
+corrigido e no ar, mas ainda sem confirmação ponta a ponta** — o último
+envio bem-sucedido registrado foi ~2min ANTES do fix entrar em vigor, e
+desde então o Lara está indisponível na rota `/api/replay/*` (ver risco
+"Indisponibilidade do Lara" no `PLANO_DE_ACAO.md` seção 11), então
+nenhum envio pós-fix teve sucesso ainda pra confirmar o horário salvo do
+lado de lá. Confirmar assim que a fila represada for enviada.
 
 ## Como rodar (jeito rápido)
 
