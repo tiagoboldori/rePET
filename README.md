@@ -55,22 +55,81 @@ do usuário, mas não faz parte desse fluxo.
 | **Usada no bring-up (2026-09-15)** | Devkit **ESP8266** vendido como "NodeMCU V3" (chip `ESP8266MOD`) | Só validou a lógica software (Wi-Fi + HTTP + GPIO). **Não é a placa definitiva** — ESP8266 não roda o componente `ethernet:` do ESPHome (é ESP32-only), então não suporta o módulo Ethernet planejado. |
 | **Definitiva (planejada, ainda não comprada)** | Devkit **ESP32** genérico (board ESPHome `esp32dev`, tipicamente vendido como "ESP32 DevKitC" ou "NodeMCU-32S", chip `ESP-WROOM-32`) + módulo Ethernet **W5500** por SPI | Suporta `ethernet:` do ESPHome nativamente; ver orçamento de pinos abaixo pra confirmar que cabe 1 hub por local com até 8 botões. |
 
-**Confirmação: cabe 8 botões + W5500 na mesma placa, com folga.** O W5500 via SPI usa só 6 pinos (config já usada nos exemplos deste repo):
+**Confirmação: cabe 8 botões + W5500 na mesma placa, com folga.** Mapeamento
+de ligações definitivo (substitui a sugestão de pinos de 2026-09-15, nunca
+soldada — este é o que vale, confirmado 2026-09-22). Placa: ESP32 DevKit V1
+(30 pinos, módulo WROOM-32) + módulo Ethernet W5500 por SPI.
 
-| Função | GPIO sugerido |
-|---|---|
-| SCK | 18 |
-| MISO | 19 |
-| MOSI | 23 |
-| CS | 5 |
-| INT | 4 |
-| RST | 14 |
+**Módulo de rede (fileira direita), 7 fios — MISO e MOSI não se cruzam
+(nomes já do ponto de vista do mestre):**
 
-Um devkit ESP32 de 30 ou 38 pinos (`esp32dev`) expõe ~22-25 GPIOs utilizáveis no total (descontando os pinos internos de flash, que nem saem no header). Subtraindo os 6 acima reservados pro W5500, sobram **16+ GPIOs livres** — o dobro do que os 8 botões precisam. Sugestão de 8 pinos pros botões, evitando os de boot-strap (`0, 2, 12, 15`) e preferindo os com pull-up interno disponível (os input-only `34/35/36/39` exigiriam resistor pull-up externo, então ficam como reserva se precisar de mais de 8):
-```
-botões: GPIO 13, 16, 17, 21, 22, 25, 26, 27
-```
-Ou seja: **não precisa de expansor de GPIO** — é exatamente o motivo pelo qual o WT32-ETH01 (que usa RMII/LAN8720, ~9-10 pinos fixos só pra Ethernet) foi descartado em favor desse devkit + W5500 (ver decisão em "Contexto do projeto").
+| Pino da DevKit | GPIO | Pino do W5500 | Rótulos alternativos |
+|---|---|---|---|
+| D19 | 19 | MISO | SO, SDO |
+| D18 | 18 | MOSI | SI, SDI |
+| D5 | 5 | SCS | CS, NSS, SCSn |
+| TX2 | 17 | SCLK | SCK, CLK |
+| RX2 | 16 | RST | RSTn, RESET |
+| GND | — | GND | — |
+| 3V3 | — | 3V3 | VCC, V3.3 |
+| — | — | INT | deixar desconectado |
+
+**Botões (fileira esquerda), pull-up interno (`INPUT_PULLUP`) — nenhum
+resistor externo, cada botão liga entre o seu GPIO e o trilho de GND:**
+
+| Quadra | Pino da DevKit | GPIO |
+|---|---|---|
+| 1 | D32 | 32 |
+| 2 | D33 | 33 |
+| 3 | D25 | 25 |
+| 4 | D26 | 26 |
+| 5 | D27 | 27 |
+| 6 | D14 | 14 |
+| 7 | D12 | 12 |
+| 8 | D13 | 13 |
+
+Pinos livres como reserva: `D4, D21, D22, D23`. `VP, VN, D34, D35` são só
+entrada, sem pull-up interno — inúteis pra botão sem resistor externo.
+
+**Pontos de atenção na montagem:**
+- **GPIO12 (quadra 7) — nunca colocar pull-up externo.** É pino de
+  strapping: em nível alto no reset, seleciona flash de 1,8V e a placa não
+  inicia. Com botão ao GND e só o pull-up interno, o pino fica baixo no
+  boot (estado correto); um resistor físico pra 3V3 quebraria isso. O
+  ESPHome emite aviso de strapping na compilação — é esperado, não é erro.
+- **Capacitor de desacoplamento** entre 3V3 e GND, o mais próximo possível
+  do módulo de rede (ponte lateral, não em série na alimentação). O W5500
+  puxa até ~150mA em rajadas ao transmitir; sem capacitor a tensão afunda
+  no pino e causa queda de link — falha que não aparece em bancada, só em
+  produção. Usar 100nF cerâmico + 10µF eletrolítico (faixa marcada no GND);
+  com o módulo fixado fora da placa, o de 10µF é o mais importante.
+- **Alimentação do módulo:** o regulador da DevKit já alimenta o ESP32; se
+  houver um LM2596 na placa, alimentar o módulo de rede por ele. Terra
+  comum obrigatório.
+- **Tensão do módulo:** conferir antes de energizar — módulos pequenos
+  (tipo W5500 Lite) são exclusivamente 3,3V e queimam de forma irreversível
+  com 5V; módulos maiores, com regulador visível, aceitam 5V.
+- **WROOM vs WROVER:** GPIO16/GPIO17 (RST/SCLK acima) são livres no
+  WROOM-32, mas consumidos pela PSRAM no WROVER (e a lógica do GPIO12
+  também se inverte nele) — conferir a serigrafia da placa antes de gravar.
+- **Identificação do controlador:** a marcação `HR911105A` é do conector
+  RJ45, não do controlador — aparece igual em módulos W5500 e ENC28J60.
+  Conferir o chip quadrado ao lado do conector. Se for ENC28J60 (evitar,
+  ver decisão de arquitetura), `interrupt_pin` passa a ser obrigatório
+  (GPIO35, com resistor de 10kΩ pra 3V3).
+- **Velocidade do SPI:** default do ESPHome é 26,67MHz; em instabilidade,
+  reduzir `clock_speed` (mínimo 8MHz) antes de suspeitar do hardware.
+  Manter os fios de SPI curtos (~5cm).
+- **Erros mais prováveis na conferência:** trocar MISO com MOSI; confundir
+  TX2 com RX2 (vizinhos, a troca inverte SCLK e RESET); nos botões, um fio
+  uma linha fora troca a quadra silenciosamente — o botão funciona e
+  reporta a quadra errada.
+
+**Validação antes da solda definitiva:** (1) montar em protoboard com o
+módulo de rede e **um** botão, compilar o YAML e confirmar que a Ethernet
+sobe com o IP fixo; (2) energizar com o botão da quadra 7 (GPIO12)
+**pressionado** — deve iniciar normalmente; (3) só então replicar pros 8
+botões e passar à perfboard.
 
 ## Onde os vídeos ficam salvos
 
@@ -356,8 +415,10 @@ integrations/
                             external_id do clipe
   heartbeat.py           -> Heartbeat periódico por câmera; falha só loga
 assets/
-  music/                 -> Faixas de música de fundo (gitignored, só a
-                            estrutura é versionada, ver assets/music/README.md)
+  music/                 -> Faixas de música de fundo — 2 faixas reais já
+                            versionadas (exceção deliberada, ver
+                            assets/music/README.md); novos arquivos locais
+                            continuam gitignored por padrão
 config/
   cameras.json          -> Registro central de câmeras (fonte única de verdade;
                             gitignored — tem credencial real, nunca commitado)
@@ -422,11 +483,13 @@ nessa ordem, antes do envio:**
    já cortado.
 3. **Música de fundo** (`integrations/audio.py`) — decisão LOCAL, não vem
    do Lara (o contrato dele não tem campo de áudio): sorteia uma faixa
-   de `MUSIC_DIR` (assets/music/, ver `assets/music/README.md`), corta
-   com loop se necessário pra exatamente a duração do clipe, aplica fade
-   in/out e volume fixo. Sem nenhuma faixa disponível, no-op (sem
-   reencode). Como as câmeras não entregam áudio, o clipe só ganha a
-   trilha da música — não há áudio original pra mixar.
+   de `MUSIC_DIR` (assets/music/, ver `assets/music/README.md`) e usa
+   sempre o TRECHO INICIAL dela (0s até a duração do clipe — ex.: clipe
+   de 30s usa os primeiros 30s da faixa), com loop só como fallback se a
+   faixa for mais curta que o clipe, mais fade in/out e volume fixo. Sem
+   nenhuma faixa disponível, no-op (sem reencode). Como as câmeras não
+   entregam áudio, o clipe só ganha a trilha da música — não há áudio
+   original pra mixar.
 
 O arquivo final (se algum dos três passos mudou algo) fica em
 `Replay.arquivo_processado` — é o que `/api/replays/{id}/media` prefere
@@ -666,8 +729,8 @@ referência:
 **Música/trilha de áudio.** Implementado (`integrations/audio.py`, ver
 seção "Integração com o Lara" acima) — não exige tocar no stream de vídeo
 (`-c:v copy` continua valendo), só o áudio é (re)codificado, custo de CPU
-desprezível. Hoje sorteia entre os arquivos de `assets/music/` (uso fixo
-enquanto houver só uma faixa lá).
+desprezível. Duas faixas reais em `assets/music/` desde 2026-09-22
+(`clubix dingle.mp3`, `rePET dingle.mp3`), sorteadas por clipe.
 
 ### Servidor central (hardware — ainda em aberto)
 
