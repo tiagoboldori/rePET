@@ -514,6 +514,26 @@ coisa (manter os processos no ar); o watchdog é a opção que funciona hoje
 sem sudo, os units são a opção mais robusta pra quando isso for
 instalado como serviço de sistema.
 
+**Nunca rode dois supervisores (dois `start.sh`/watchdog) como usuários
+diferentes na mesma máquina.** `kill -0` (a checagem de "já tá rodando" via
+`run/*.pid`) falha entre usuários diferentes — sem permissão pra sinalizar
+processo alheio — então dois watchdogs de usuários diferentes nunca se
+reconhecem um ao outro e cada um fica subindo duplicata da captura/API sem
+nunca matar a anterior. Aconteceu de verdade (2026-09-22): um watchdog
+órfão como `root`, esquecido de uma sessão anterior, ficou horas rodando
+em paralelo com o watchdog normal — resultado foram dezenas de `ffmpeg`
+simultâneos na mesma câmera, cada um com seu próprio relógio interno,
+produzindo clipe final com conteúdo fora de ordem ("vídeo voltando").
+Defesa adicionada em `ensure_services.sh`/`start.sh`: antes de subir
+qualquer processo, além do `kill -0` no PID salvo, um `pgrep -f` (que
+enxerga processo de qualquer usuário, já que só lê `/proc`) procura por
+outro processo já rodando o mesmo comando; se achar, recusa subir
+duplicata e avisa alto no log em vez de empilhar mais um. Isso reduz o
+dano, mas não substitui garantir que só uma sessão/usuário rode o `start.sh`
+por vez — se aparecer um aviso desses, mate o processo órfão manualmente
+(`ps -o pid,user,cmd -p <PID>`, `sudo kill <PID>` se for de outro usuário)
+antes de rodar de novo.
+
 ## Como testar localmente (sem câmera real, sem hardware)
 
 **Teste 0 — camada de persistência (`db/`) e migração de câmeras, sem

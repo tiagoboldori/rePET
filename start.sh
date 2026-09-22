@@ -128,9 +128,19 @@ ROOT="$ROOT" bash "$ROOT/scripts/ensure_services.sh"
 echo
 
 # --- 4) Sobe o watchdog (supervisão contínua, ver seção "Watchdog" no README) --
+# Checagem extra (não só kill -0 no PID salvo): ver check_no_foreign_duplicate
+# em scripts/ensure_services.sh — mesmo raciocínio se aplica aqui, com um
+# agravante: o watchdog É o processo que sobe tudo mais. Dois watchdogs
+# concorrentes de usuários diferentes (achado real em 2026-09-22, ver
+# memória do projeto) é justamente o que causou dezenas de captura
+# duplicada — pgrep -f enxerga processo de outro usuário mesmo quando
+# kill -0 não consegue (sem permissão de sinal entre usuários diferentes).
 WATCHDOG_PID_FILE="$RUN_DIR/watchdog.pid"
+WATCHDOG_FOREIGN="$(pgrep -f -- "scripts/watchdog_loop.sh" 2>/dev/null | grep -vx "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null || true)" || true)"
 if [[ -f "$WATCHDOG_PID_FILE" ]] && kill -0 "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null; then
     ok "Watchdog já rodando (PID $(cat "$WATCHDOG_PID_FILE"))"
+elif [[ -n "$WATCHDOG_FOREIGN" ]]; then
+    fail "Watchdog: já existe processo rodando fora do run/watchdog.pid esperado (PID(s): $(echo "$WATCHDOG_FOREIGN" | tr '\n' ' ')) — provável duplicata de outra sessão/usuário. NÃO vou subir mais um. Confira o dono ('ps -o pid,user,cmd -p <PID>') e mate manualmente ('sudo kill <PID>' se for de outro usuário) antes de rodar de novo."
 else
     info "Subindo watchdog (reconfere os serviços acima a cada 30s, reinicia o que cair) ..."
     nohup env ROOT="$ROOT" bash "$ROOT/scripts/watchdog_loop.sh" 30 \
