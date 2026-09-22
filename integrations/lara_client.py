@@ -12,7 +12,7 @@ conhecer números de status.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -91,10 +91,10 @@ def _parse_overlay(raw: dict | None) -> OverlayConfig | None:
     )
 
 
-def _parse_camera(raw: dict) -> CameraConfig:
+def _parse_camera(raw: dict, default_config_hash: str | None = None) -> CameraConfig:
     return CameraConfig(
         external_id=raw["external_id"],
-        config_hash=raw["config_hash"],
+        config_hash=raw.get("config_hash", default_config_hash),
         orientation=raw["orientation"],
         clip_seconds=int(raw["clip_seconds"]),
         overlay=_parse_overlay(raw.get("overlay")),
@@ -159,13 +159,25 @@ class LaraClient:
         return self._request("GET", "/ping").json()
 
     def get_cameras(self) -> list[CameraConfig]:
+        """Resposta real do Lara: `{"config_hash": <hash do lote>, "cameras":
+        [...]}` — um hash só pra todas as câmeras, não um por câmera (o
+        contrato original presumia um `config_hash` dentro de cada item da
+        lista; a API de verdade não manda isso). Usamos o hash do lote como
+        `config_hash` de cada `CameraConfig`, exceto se algum item específico
+        vier com o seu próprio (resiliente a uma mudança futura no Lara)."""
         data = self._request("GET", "/cameras").json()
-        cameras = data.get("data", data) if isinstance(data, dict) else data
-        return [_parse_camera(c) for c in cameras]
+        if isinstance(data, dict):
+            batch_hash = data.get("config_hash")
+            cameras = data.get("cameras", data.get("data", data))
+        else:
+            batch_hash = None
+            cameras = data
+        return [_parse_camera(c, batch_hash) for c in cameras]
 
     def get_camera(self, external_id: str) -> CameraConfig:
         data = self._request("GET", f"/cameras/{external_id}").json()
-        return _parse_camera(data.get("data", data) if isinstance(data, dict) else data)
+        raw = data.get("data", data) if isinstance(data, dict) else data
+        return _parse_camera(raw, raw.get("config_hash") if isinstance(raw, dict) else None)
 
     def send_heartbeat(self, external_id: str) -> None:
         self._request("POST", f"/cameras/{external_id}/heartbeat")
@@ -181,7 +193,18 @@ class LaraClient:
         """`clip_external_id` é o identificador do clipe NESTE sistema
         (Replay.id) — é o que torna o envio idempotente do lado do Lara
         (RNF11). `recorded_at` é o instante do aperto do botão, não o do
-        envio (pode ter ficado tempo na fila local)."""
+        envio (pode ter ficado tempo na fila local).
+
+        `recorded_at` chega aqui naive (`Replay.criado_em` vem de
+        `datetime.now()`) — mas o relógio deste servidor é UTC (`Etc/UTC`),
+        então esse valor já É um instante UTC, só falta a marcação. Sem
+        offset explícito, o Lara (Laravel/Carbon) assume o timezone do
+        APP dele (America/Sao_Paulo, UTC-3) ao interpretar a string —
+        deslocando o horário do clipe em 3h. Anexar `+00:00` deixa a
+        string inequívoca (achado comparando com timestamps do próprio
+        Lara, que vêm com offset explícito)."""
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=timezone.utc)
         with file_path.open("rb") as fh:
             resp = self._request(
                 "POST",

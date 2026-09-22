@@ -122,20 +122,24 @@ def test_server_error(monkeypatch):
 
 
 def test_get_cameras_parses_config_hash_and_overlay(monkeypatch):
-    body = [
-        {
-            "external_id": "loc1-quadra1",
-            "config_hash": "abc123",
-            "orientation": "vertical",
-            "clip_seconds": 20,
-            "overlay": {
-                "png_url": "https://lara.example/overlays/abc.png",
-                "animated_url": None,
-                "width": 1080,
-                "height": 1920,
-            },
-        }
-    ]
+    # Shape real do Lara: hash do lote na raiz, lista sob "cameras", sem
+    # config_hash por item (confirmado batendo no servidor real em 2026-09-22).
+    body = {
+        "config_hash": "abc123",
+        "cameras": [
+            {
+                "external_id": "loc1-quadra1",
+                "orientation": "vertical",
+                "clip_seconds": 20,
+                "overlay": {
+                    "png_url": "https://lara.example/overlays/abc.png",
+                    "animated_url": None,
+                    "width": 1080,
+                    "height": 1920,
+                },
+            }
+        ],
+    }
     client = _client_with_fake_response(monkeypatch, _FakeResponse(200, json_body=body))
     cameras = client.get_cameras()
     assert len(cameras) == 1
@@ -143,6 +147,57 @@ def test_get_cameras_parses_config_hash_and_overlay(monkeypatch):
     assert cameras[0].orientation == "vertical"
     assert cameras[0].overlay.png_url == "https://lara.example/overlays/abc.png"
     assert cameras[0].overlay.animated_url is None
+
+
+def test_get_cameras_uses_per_camera_hash_when_present(monkeypatch):
+    # Resiliência: se o Lara passar a mandar um config_hash por item no
+    # futuro, ele deve prevalecer sobre o hash do lote.
+    body = {
+        "config_hash": "batch-hash",
+        "cameras": [
+            {
+                "external_id": "loc1-quadra1",
+                "config_hash": "own-hash",
+                "orientation": "vertical",
+                "clip_seconds": 20,
+                "overlay": None,
+            }
+        ],
+    }
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(200, json_body=body))
+    cameras = client.get_cameras()
+    assert cameras[0].config_hash == "own-hash"
+
+
+def test_upload_video_sends_recorded_at_with_explicit_utc_offset(monkeypatch, tmp_path):
+    # Replay.criado_em vem de datetime.now() naive — mas o relógio do
+    # servidor é UTC. Sem offset explícito, o Lara (Laravel/Carbon)
+    # interpreta a string no timezone do app dele (America/Sao_Paulo,
+    # UTC-3), deslocando o horário do clipe em 3h.
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResponse(
+            201,
+            json_body={"uuid": "u1", "url": "https://lara.example/u1", "expires_at": "2026-09-29T00:00:00-03:00"},
+        )
+
+    client = LaraClient(base_url="https://lara.example/api/replay", token="1|abc")
+    monkeypatch.setattr(client._session, "request", fake_request)
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"fake")
+
+    client.upload_video(
+        external_id="loc1-quadra1",
+        file_path=clip,
+        recorded_at=datetime(2026, 9, 22, 13, 37, 49),  # naive, instante real em UTC
+        duration_seconds=35,
+        clip_external_id="replay-1",
+    )
+
+    assert captured["data"]["recorded_at"] == "2026-09-22T13:37:49+00:00"
 
 
 # --- config_sync: config_hash como cache barato ----------------------------
