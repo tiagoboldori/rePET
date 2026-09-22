@@ -214,12 +214,20 @@ def get_replay_media(replay_id: str, session: Session = Depends(get_session)):
 
     `FileResponse` do Starlette já implementa requisições parciais
     (`Range`/206, `Accept-Ranges`, `ETag`) nativamente — RNF1 sem código
-    extra aqui. `max-age` curto (1h) em vez de `immutable`: o arquivo
-    servido para um dado replay_id pode trocar (de bruto pro processado)
-    pouco depois da criação, quando o worker do Lara aplica orientação/
-    overlay — mas o ETag muda junto (baseado em mtime+tamanho do arquivo
-    real), então um cache mais agressivo não serviria conteúdo velho
-    depois de expirar."""
+    extra aqui. `no-cache` (não `immutable` nem `max-age` longo): o
+    arquivo servido para um dado replay_id troca (de bruto pro
+    processado) pouco depois da criação, quando o worker do Lara aplica
+    orientação/overlay/música — e um `max-age` qualquer (mesmo curto,
+    1h) faz o NAVEGADOR nem consultar o servidor de novo dentro da
+    janela, servindo o bruto direto do cache local mesmo depois do
+    arquivo já ter sido trocado no servidor (achado na prática em
+    2026-09-22: sócio via o vídeo logo após o clique do botão, antes do
+    processamento terminar, e ficava com o bruto em cache por até 1h).
+    `no-cache` força revalidação a cada carregamento (`If-None-Match`
+    contra o `ETag`, baseado em mtime+tamanho do arquivo real) — 304 se
+    o arquivo não mudou (sem re-baixar), 200 com o conteúdo novo assim
+    que mudar. Continua cacheável (é diferente de `no-store`), só não
+    serve stale."""
     replay = session.get(Replay, replay_id)
     if replay is None:
         raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
@@ -236,7 +244,7 @@ def get_replay_media(replay_id: str, session: Session = Depends(get_session)):
         path,
         media_type="video/mp4",
         filename=filename,
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "no-cache"},
     )
 
 
