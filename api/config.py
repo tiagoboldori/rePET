@@ -66,6 +66,21 @@ LARA_UPLOAD_POLL_INTERVAL_SECONDS = float(
 # dias). Proposto 3 dias (S3/RNF5 do PLANO_DE_ACAO.md v3), a confirmar.
 LOCAL_RAW_RETENTION_DAYS = float(os.environ.get("LOCAL_RAW_RETENTION_DAYS", "3"))
 
+# --- Música de fundo (mixada no clipe final, decisão LOCAL — o Lara não
+# tem campo de áudio no contrato, ver README seção Lara) ------------------
+# Pasta com as faixas disponíveis. Hoje normalmente um único arquivo (uso
+# fixo, fase inicial), mas a escolha entre os arquivos encontrados aqui já
+# é aleatória — pronta pro sorteio quando houver mais de uma faixa, sem
+# precisar mexer em código. Pasta ausente/vazia = sem música (no-op).
+MUSIC_DIR = Path(
+    os.environ.get(
+        "MUSIC_DIR",
+        str(Path(__file__).resolve().parent.parent / "assets" / "music"),
+    )
+)
+MUSIC_VOLUME = float(os.environ.get("MUSIC_VOLUME", "0.5"))
+MUSIC_FADE_SECONDS = float(os.environ.get("MUSIC_FADE_SECONDS", "1.5"))
+
 # --- Autenticação HTTP Basic da superfície de gerenciamento (M11) --------
 # Sem default de propósito, mesmo padrão de REPLAY_API_TOKEN — é
 # credencial, não algo pra inventar. Enquanto não configurado, os

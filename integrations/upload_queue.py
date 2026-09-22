@@ -2,8 +2,9 @@
 upload_queue.py — fila de envio de clipes ao Lara (PT-15,
 PLANO_DE_ACAO.md v3 seção 6, itens 3-5). Processa `Replay` com
 `lara_status=PENDENTE`: aplica orientação (crop, mecânico, sem decisão,
-ver integrations/orientation.py) e depois overlay (idem,
-integrations/overlay.py) em cima do resultado, então envia via
+ver integrations/orientation.py), depois overlay (idem,
+integrations/overlay.py) e depois música de fundo (decisão LOCAL, não vem
+do Lara — ver integrations/audio.py) em cima do resultado, então envia via
 `POST /cameras/{id}/videos`, idempotente por `external_id` do clipe
 (`Replay.id`, RNF11).
 
@@ -30,6 +31,7 @@ from sqlmodel import Session, or_, select
 
 from clipper.clip_generator import ClipGenerationError
 from db.models import Quadra, Replay, ReplayLaraStatus
+from integrations.audio import AudioApplicationError, apply_audio
 from integrations.lara_client import (
     LaraAuthError,
     LaraClient,
@@ -49,7 +51,14 @@ BACKOFF_BASE_SECONDS = 10
 BACKOFF_MAX_SECONDS = 600
 
 
-def process_pending(session: Session, client: LaraClient, output_dir: Path) -> None:
+def process_pending(
+    session: Session,
+    client: LaraClient,
+    output_dir: Path,
+    music_dir: Path | None = None,
+    music_volume: float = 0.5,
+    music_fade_seconds: float = 1.5,
+) -> None:
     now = datetime.now()
     pendentes = session.exec(
         select(Replay).where(
@@ -62,11 +71,17 @@ def process_pending(session: Session, client: LaraClient, output_dir: Path) -> N
     ).all()
 
     for replay in pendentes:
-        _process_one(session, client, output_dir, replay)
+        _process_one(session, client, output_dir, replay, music_dir, music_volume, music_fade_seconds)
 
 
 def _process_one(
-    session: Session, client: LaraClient, output_dir: Path, replay: Replay
+    session: Session,
+    client: LaraClient,
+    output_dir: Path,
+    replay: Replay,
+    music_dir: Path | None,
+    music_volume: float,
+    music_fade_seconds: float,
 ) -> None:
     quadra = session.get(Quadra, replay.quadra_id)
     if quadra is None:
@@ -102,6 +117,16 @@ def _process_one(
             send_path = overlaid_path
             replay.arquivo_processado = send_path.name
 
+        audio_path = apply_audio(send_path, music_dir, music_volume, music_fade_seconds)
+        if audio_path != send_path:
+            # mesmo raciocínio do intermediário só-orientado acima: o
+            # arquivo só-com-overlay (sem música) deixou de ser o
+            # arquivo_processado atual, não pode virar órfão em disco.
+            if send_path != clip_path:
+                send_path.unlink(missing_ok=True)
+            send_path = audio_path
+            replay.arquivo_processado = send_path.name
+
         result = client.upload_video(
             external_id=replay.quadra_id,
             file_path=send_path,
@@ -109,7 +134,12 @@ def _process_one(
             duration_seconds=round(replay.duracao_segundos),
             clip_external_id=replay.id,
         )
-    except (OrientationApplicationError, OverlayApplicationError, ClipGenerationError) as exc:
+    except (
+        OrientationApplicationError,
+        OverlayApplicationError,
+        AudioApplicationError,
+        ClipGenerationError,
+    ) as exc:
         # falha de processamento LOCAL (ffmpeg/ffprobe) — não é rede/Lara,
         # mas RNF9 pede o mesmo tratamento: logar e retentar, nunca travar
         # a fila nem impedir a disponibilidade local do replay já gerado.

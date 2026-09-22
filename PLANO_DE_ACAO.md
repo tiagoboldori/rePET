@@ -153,6 +153,11 @@ o clipe é reencodado uma vez (filtro `overlay` do ffmpeg) antes do envio —
 `-c copy` (ver riscos, seção 11). Se não houver overlay (`overlay: null`),
 o clipe segue para envio sem reencode algum.
 
+**3.1) Música de fundo — decisão LOCAL, fora do contrato do Lara.** Depois
+da orientação/overlay e antes do envio, o clipe pode ganhar uma trilha de
+fundo sorteada localmente (`assets/music/`, ver README) — o Lara não tem
+campo de áudio nesse contrato, então isso nunca é lido de `GET /cameras`.
+
 **4) Envio do clipe.** `POST /cameras/{external_id}/videos`, multipart,
 sempre com `external_id` do **clipe** (não confundir com o `external_id`
 da câmera na URL — é o identificador que este sistema já usa para o
@@ -230,7 +235,7 @@ deixou de ter objeto, ver seção 12.)*
 | Qualquer interface web de administração | Fora do escopo do projeto por definição. |
 | Migração para PostgreSQL | Adiada conforme a seção 4, por gatilho e não por calendário. |
 | Aceleração de vídeo em hardware | Depende do servidor central, ainda não definido. Volta a ser relevante com o reencode de overlay (seção 6, item 3) — reavaliar se o custo de CPU se mostrar alto na prática. |
-| Trilha de áudio nos clipes | Tecnicamente barata, sem prioridade de produto no momento. |
+| Trilha de áudio nos clipes | **Implementado em 22/09/2026**, fora do ciclo MoSCoW original — decisão local (não faz parte do contrato do Lara), ver `integrations/audio.py` e README seção "Integração com o Lara". |
 | Contas de cliente, reivindicação de replay, integração com reserva | Rejeitado em definitivo em decisão anterior. |
 | Detecção por inteligência artificial e NVR completo | Descartado em decisão anterior. |
 

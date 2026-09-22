@@ -30,6 +30,7 @@ from integrations.lara_client import (
     OverlayConfig,
     UploadResult,
 )
+from integrations.audio import AudioApplicationError, apply_audio
 from integrations.orientation import OrientationApplicationError, apply_orientation
 from integrations.overlay import OverlayApplicationError, apply_overlay
 
@@ -503,6 +504,44 @@ def test_process_pending_chains_orientation_then_overlay_and_cleans_intermediate
         assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_oriented_overlay.mp4"
 
 
+def test_process_pending_chains_audio_after_overlay_and_cleans_intermediate(tmp_path, monkeypatch):
+    """música é o último passo da cadeia (depois de orientação e overlay,
+    ver upload_queue.py) e o intermediário sem música não pode sobrar em
+    disco órfão — mesmo raciocínio do teste de orientation->overlay acima."""
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    music_dir = tmp_path / "music"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        replay = _seed_pending_replay(session, output_dir)
+        clip_path = output_dir / replay.arquivo_bruto
+
+        def _fake_overlay(path, quadra):
+            overlaid = path.with_name(f"{path.stem}_overlay.mp4")
+            overlaid.write_bytes(b"overlaid")
+            return overlaid
+
+        def _fake_audio(path, m_dir, volume, fade):
+            assert path.name.endswith("_overlay.mp4")  # recebeu a saída do overlay
+            assert m_dir == music_dir
+            with_audio = path.with_name(f"{path.stem}_audio.mp4")
+            with_audio.write_bytes(b"with audio")
+            return with_audio
+
+        monkeypatch.setattr(upload_queue, "apply_overlay", _fake_overlay)
+        monkeypatch.setattr(upload_queue, "apply_audio", _fake_audio)
+
+        client = _FakeLaraClientForSync()
+        upload_queue.process_pending(session, client, output_dir, music_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.ENVIADO
+        assert replay.arquivo_processado == f"{clip_path.stem}_overlay_audio.mp4"
+        assert not (output_dir / f"{clip_path.stem}_overlay.mp4").exists()  # intermediário limpo
+        assert (output_dir / f"{clip_path.stem}_overlay_audio.mp4").exists()  # final preservado
+        assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_overlay_audio.mp4"
+
+
 # --- heartbeat: falha não propaga ------------------------------------------
 
 
@@ -660,3 +699,100 @@ def test_apply_orientation_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monk
         apply_orientation(clip, _quadra_com_orientation("vertical"))
 
     assert not (tmp_path / "loc1-quadra1_20260917140000_oriented.mp4").exists()
+
+
+# --- audio: mixagem local de música de fundo, nunca vem do Lara ------------
+
+
+def test_apply_audio_noop_when_music_dir_missing(tmp_path):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    assert apply_audio(clip, tmp_path / "no-such-dir") == clip
+
+
+def test_apply_audio_noop_when_music_dir_empty(tmp_path):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    assert apply_audio(clip, music_dir) == clip
+
+
+def test_apply_audio_noop_when_music_dir_is_none(tmp_path):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    assert apply_audio(clip, None) == clip
+
+
+def test_apply_audio_ignores_non_audio_files(tmp_path):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    (music_dir / "README.md").write_text("não é áudio")
+    assert apply_audio(clip, music_dir) == clip
+
+
+def test_apply_audio_mixes_single_track_with_fade_and_volume(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    track = music_dir / "trilha.mp3"
+    track.write_bytes(b"fake mp3")
+
+    monkeypatch.setattr("integrations.audio.probe_duration_seconds", lambda path: 35.0)
+    calls = []
+    monkeypatch.setattr("integrations.audio._run", lambda cmd: calls.append(cmd))
+
+    result = apply_audio(clip, music_dir, volume=0.5, fade_seconds=1.5)
+    assert result.name == "loc1-quadra1_20260917140000_audio.mp4"
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert str(track) in cmd
+    assert "-stream_loop" in cmd  # loop pra cobrir faixa mais curta que o clipe
+    filter_arg = cmd[cmd.index("-filter_complex") + 1]
+    assert "atrim=0:35.0" in filter_arg
+    assert "afade=t=in:st=0:d=1.5" in filter_arg
+    assert "afade=t=out:st=33.5:d=1.5" in filter_arg
+    assert "volume=0.5" in filter_arg
+    assert "-map" in cmd and "0:v" in cmd  # vídeo vem do clipe, não da música
+    assert "-c:v" in cmd and "copy" in cmd  # nunca reencoda vídeo por causa de áudio
+
+
+def test_apply_audio_picks_randomly_among_multiple_tracks(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    track_a = music_dir / "a.mp3"
+    track_a.write_bytes(b"a")
+    track_b = music_dir / "b.mp3"
+    track_b.write_bytes(b"b")
+
+    monkeypatch.setattr("integrations.audio.probe_duration_seconds", lambda path: 35.0)
+    monkeypatch.setattr("integrations.audio._run", lambda cmd: None)
+    monkeypatch.setattr("integrations.audio.random.choice", lambda seq: track_b)
+
+    result = apply_audio(clip, music_dir)
+    assert result.name == "loc1-quadra1_20260917140000_audio.mp4"
+
+
+def test_apply_audio_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypatch):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    (music_dir / "trilha.mp3").write_bytes(b"fake mp3")
+
+    monkeypatch.setattr("integrations.audio.probe_duration_seconds", lambda path: 35.0)
+
+    def _boom(cmd):
+        raise AudioApplicationError("ffmpeg explodiu")
+
+    monkeypatch.setattr("integrations.audio._run", _boom)
+
+    with pytest.raises(AudioApplicationError):
+        apply_audio(clip, music_dir)
+
+    assert not (tmp_path / "loc1-quadra1_20260917140000_audio.mp4").exists()

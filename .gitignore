@@ -226,3 +226,9 @@ __marimo__/
 # público, nunca commitar isto. Use config/cameras.example.json como
 # ponto de partida (copiar pra config/cameras.json e preencher de verdade).
 /config/cameras.json
+
+# rePET: faixas de música reais (licenciamento/tamanho) — só a estrutura
+# (README.md, .gitkeep) fica versionada, ver assets/music/README.md.
+/assets/music/*
+!/assets/music/.gitkeep
+!/assets/music/README.md

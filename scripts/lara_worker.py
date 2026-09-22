@@ -54,7 +54,10 @@ def main() -> None:
         ("sync", config.LARA_POLL_INTERVAL_SECONDS,
          lambda s: config_sync.sync_once(s, client, config.OVERLAY_CACHE_DIR)),
         ("upload", config.LARA_UPLOAD_POLL_INTERVAL_SECONDS,
-         lambda s: upload_queue.process_pending(s, client, config.OUTPUT_DIR)),
+         lambda s: upload_queue.process_pending(
+             s, client, config.OUTPUT_DIR,
+             config.MUSIC_DIR, config.MUSIC_VOLUME, config.MUSIC_FADE_SECONDS,
+         )),
         ("heartbeat", config.LARA_HEARTBEAT_INTERVAL_SECONDS,
          lambda s: heartbeat.send_all(s, client)),
     ]

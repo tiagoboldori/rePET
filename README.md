@@ -348,10 +348,16 @@ integrations/
                             Lara, via crop centralizado (ffmpeg)
   overlay.py             -> Aplica (nunca decide) o overlay em cache no clipe,
                             via ffmpeg, escalando pro tamanho real do vídeo
-  upload_queue.py        -> Processa Replay pendente: aplica orientação e
-                            depois overlay, envia ao Lara, idempotente por
+  audio.py               -> Mixa música de fundo (decisão LOCAL, não vem do
+                            Lara) — sorteia uma faixa de assets/music/, corta
+                            pra duração do clipe com fade in/out
+  upload_queue.py        -> Processa Replay pendente: aplica orientação,
+                            overlay e música, envia ao Lara, idempotente por
                             external_id do clipe
   heartbeat.py           -> Heartbeat periódico por câmera; falha só loga
+assets/
+  music/                 -> Faixas de música de fundo (gitignored, só a
+                            estrutura é versionada, ver assets/music/README.md)
 config/
   cameras.json          -> Registro central de câmeras (fonte única de verdade;
                             gitignored — tem credencial real, nunca commitado)
@@ -387,7 +393,7 @@ test/
   test_lara_integration.py -> pytest: cliente do Lara (mapeamento de erro),
                                 cache por config_hash, fila de envio (com
                                 backoff, inclusive de falha local de
-                                ffmpeg), orientação (crop), overlay
+                                ffmpeg), orientação (crop), overlay, música
   run_pipeline_test.sh     -> Testa capture + clipper direto (sem API, sem câmera real)
   run_api_test.sh          -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
 start.sh                  -> Sobe venv/deps, carrega .env, roda os testes padrão e
@@ -414,8 +420,15 @@ nessa ordem, antes do envio:**
 2. **Overlay** (`integrations/overlay.py`) — queima a logo em cima do
    resultado da orientação (não do bruto), escalando pro tamanho real
    já cortado.
+3. **Música de fundo** (`integrations/audio.py`) — decisão LOCAL, não vem
+   do Lara (o contrato dele não tem campo de áudio): sorteia uma faixa
+   de `MUSIC_DIR` (assets/music/, ver `assets/music/README.md`), corta
+   com loop se necessário pra exatamente a duração do clipe, aplica fade
+   in/out e volume fixo. Sem nenhuma faixa disponível, no-op (sem
+   reencode). Como as câmeras não entregam áudio, o clipe só ganha a
+   trilha da música — não há áudio original pra mixar.
 
-O arquivo final (se algum dos dois mudou algo) fica em
+O arquivo final (se algum dos três passos mudou algo) fica em
 `Replay.arquivo_processado` — é o que `/api/replays/{id}/media` prefere
 servir, e o que é enviado ao Lara.
 
@@ -430,6 +443,9 @@ primeiras — são endereço/credencial de outro sistema):
 | `LARA_POLL_INTERVAL_SECONDS` | não (default `120`) | Intervalo entre pulls de `GET /cameras` e heartbeats |
 | `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | não (default `10`) | Intervalo entre passadas da fila de envio de clipes — só afeta a LATÊNCIA de detectar um replay novo pendente, não o ritmo de retentativa de um que já falhou (ver backoff abaixo) |
 | `LOCAL_RAW_RETENTION_DAYS` | não (default `3`, a confirmar) | Retenção do arquivo local, usado só pela página de teste `/quadra/{id}` — não é a entrega ao sócio (essa é do Lara, 7 dias) |
+| `MUSIC_DIR` | não (default `assets/music/`) | Pasta com as faixas de música de fundo — ver `assets/music/README.md`. Vazia/ausente = sem música |
+| `MUSIC_VOLUME` | não (default `0.5`) | Volume fixo aplicado à faixa (filtro `volume` do ffmpeg) |
+| `MUSIC_FADE_SECONDS` | não (default `1.5`) | Duração do fade in/out da música no início/fim do clipe |
 
 **Configuração persistente (recomendado):** `cp .env.example .env`,
 preencher `LARA_BASE_URL`/`REPLAY_API_TOKEN`/`ADMIN_USERNAME`/
@@ -647,10 +663,11 @@ referência:
   a composição da logo do lado dele. Mantido só como registro histórico,
   não é mais caminho ativo.
 
-**Música/trilha de áudio.** Ainda não implementado. Barato quando for:
-não exige tocar no vídeo (`-c:v copy` continua valendo), só o áudio é
-(re)codificado — custo de CPU desprezível, compatível com a otimização
-atual do trim.
+**Música/trilha de áudio.** Implementado (`integrations/audio.py`, ver
+seção "Integração com o Lara" acima) — não exige tocar no stream de vídeo
+(`-c:v copy` continua valendo), só o áudio é (re)codificado, custo de CPU
+desprezível. Hoje sorteia entre os arquivos de `assets/music/` (uso fixo
+enquanto houver só uma faixa lá).
 
 ### Servidor central (hardware — ainda em aberto)
 
