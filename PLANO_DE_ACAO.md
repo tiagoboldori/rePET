@@ -184,6 +184,18 @@ do Lara.
 comando que chama `/ping` e `/cameras` e mostra, por câmera, a configuração
 em vigor e se o overlay já foi baixado — cobre o item S2 (seção 7.2).
 
+**Auditoria campo a campo em 2026-09-24.** O texto original do prompt de
+integração (não mais só um resumo próprio — colado de novo pelo
+responsável e desta vez salvo de forma recuperável) foi comparado ponto a
+ponto contra todo `integrations/` (`lara_client.py`, `config_sync.py`,
+`overlay.py`, `orientation.py`, `render.py`, `upload_queue.py`,
+`heartbeat.py`) e `scripts/lara_diagnostic.py`. **Nenhuma divergência de
+código foi encontrada** — os 7 itens acima, os campos do envio, a
+idempotência, o backoff e o diagnóstico já batiam com o texto literal. A
+única lacuna que segue real é a leitura do `docs/replay-api.md` completo
+(ver seção 8, ainda pendente) — a implementação inteira foi feita em cima
+deste resumo, nunca do contrato completo do Lara.
+
 ---
 
 ## 7. Requisitos funcionais priorizados

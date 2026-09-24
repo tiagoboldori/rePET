@@ -570,6 +570,20 @@ definitiva (422/413). Sem isso, uma indisponibilidade prolongada do Lara
 bateria nele a cada `LARA_UPLOAD_POLL_INTERVAL_SECONDS` pra cada replay
 pendente.
 
+**Auditoria campo a campo contra o texto literal do prompt do Lara
+(2026-09-24):** comparado ponto a ponto contra todo este módulo de
+integração (cadência do pull/heartbeat, gate por `config_hash`, aplicação
+do overlay em `(0,0)` sem posicionar, preferência `animated_url` >
+`png_url`, rescale pro tamanho real do clipe, `sources` ignorado,
+multipart do envio, idempotência por `external_id` do clipe, `recorded_at`
+= instante do botão, `url` do Lara nunca persistida, backoff em falha
+transitória, 422/413 sem retry, diagnóstico ao vivo) — **nenhuma
+divergência de código encontrada.** A única lacuna que segue em aberto é
+`docs/replay-api.md` (o contrato completo do Lara, citado no próprio
+prompt): nunca foi pedido/lido; a implementação inteira foi feita em cima
+do resumo/prompt, não do contrato completo (ver `PLANO_DE_ACAO.md` seção
+6/8).
+
 **`recorded_at` sempre com offset explícito (corrigido em 2026-09-22).**
 `Replay.criado_em` vem de `datetime.now()` naive; o relógio do servidor é
 UTC (`Etc/UTC`), então o valor já É um instante UTC, só sem a marcação.
