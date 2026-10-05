@@ -68,7 +68,7 @@ def apply_overlay(clip_path: Path, quadra: Quadra) -> Path:
         "-i", str(clip_path),
         *overlay_input,
         "-filter_complex", filter_complex,
-        "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "copy",
         str(output_path),
     ]

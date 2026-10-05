@@ -114,6 +114,7 @@ class LaraClient:
         self._timeout = timeout
         self._session = requests.Session()
         self._session.headers["Authorization"] = f"Bearer {token}"
+        self._session.headers["Accept"] = "application/json"
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{self._base_url}{path}"

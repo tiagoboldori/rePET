@@ -95,7 +95,7 @@ def _apply_combined(clip_path: Path, crop: tuple[int, int], overlay_path: Path) 
         "-i", str(clip_path),
         *overlay_input,
         "-filter_complex", filter_complex,
-        "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "copy",
         str(output_path),
     ]

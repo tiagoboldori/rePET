@@ -102,7 +102,7 @@ def apply_orientation(clip_path: Path, quadra: Quadra) -> Path:
         "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
         "-i", str(clip_path),
         "-vf", f"crop={crop_w}:{crop_h}",
-        "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "copy",
         str(output_path),
     ]
