@@ -12,7 +12,7 @@ conhecer números de status.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -197,15 +197,12 @@ class LaraClient:
         envio (pode ter ficado tempo na fila local).
 
         `recorded_at` chega aqui naive (`Replay.criado_em` vem de
-        `datetime.now()`) — mas o relógio deste servidor é UTC (`Etc/UTC`),
-        então esse valor já É um instante UTC, só falta a marcação. Sem
-        offset explícito, o Lara (Laravel/Carbon) assume o timezone do
-        APP dele (America/Sao_Paulo, UTC-3) ao interpretar a string —
-        deslocando o horário do clipe em 3h. Anexar `+00:00` deixa a
-        string inequívoca (achado comparando com timestamps do próprio
-        Lara, que vêm com offset explícito)."""
+        `datetime.now()`), ou seja, no horário LOCAL do servidor
+        (America/Sao_Paulo). `astimezone()` num naive assume o fuso do
+        sistema e anexa o offset real (-03:00), então a string enviada é
+        inequívoca e independe do timezone do app do Lara."""
         if recorded_at.tzinfo is None:
-            recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+            recorded_at = recorded_at.astimezone()
         with file_path.open("rb") as fh:
             resp = self._request(
                 "POST",

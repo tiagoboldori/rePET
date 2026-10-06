@@ -9,6 +9,7 @@ mudou? qual overlay preferir? qual exceção mapear?), não o ffmpeg em si
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -171,11 +172,12 @@ def test_get_cameras_uses_per_camera_hash_when_present(monkeypatch):
     assert cameras[0].config_hash == "own-hash"
 
 
-def test_upload_video_sends_recorded_at_with_explicit_utc_offset(monkeypatch, tmp_path):
-    # Replay.criado_em vem de datetime.now() naive — mas o relógio do
-    # servidor é UTC. Sem offset explícito, o Lara (Laravel/Carbon)
-    # interpreta a string no timezone do app dele (America/Sao_Paulo,
-    # UTC-3), deslocando o horário do clipe em 3h.
+def test_upload_video_sends_recorded_at_with_explicit_local_offset(monkeypatch, tmp_path):
+    # Replay.criado_em vem de datetime.now() naive, no horário local do
+    # servidor (America/Sao_Paulo). O envio anexa o offset real (-03:00)
+    # pra não depender do timezone do app do Lara.
+    monkeypatch.setenv("TZ", "America/Sao_Paulo")
+    time.tzset()
     captured = {}
 
     def fake_request(method, url, **kwargs):
@@ -194,12 +196,12 @@ def test_upload_video_sends_recorded_at_with_explicit_utc_offset(monkeypatch, tm
     client.upload_video(
         external_id="loc1-quadra1",
         file_path=clip,
-        recorded_at=datetime(2026, 9, 22, 13, 37, 49),  # naive, instante real em UTC
+        recorded_at=datetime(2026, 9, 22, 13, 37, 49),  # naive, horário local
         duration_seconds=35,
         clip_external_id="replay-1",
     )
 
-    assert captured["data"]["recorded_at"] == "2026-09-22T13:37:49+00:00"
+    assert captured["data"]["recorded_at"] == "2026-09-22T13:37:49-03:00"
 
 
 # --- config_sync: config_hash como cache barato ----------------------------
