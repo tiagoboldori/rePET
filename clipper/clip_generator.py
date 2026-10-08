@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
-"""
-clip_generator.py — corta o clipe final (últimos N segundos) a partir do
-buffer contínuo de segmentos gravado por capture_camera.sh.
+"""Corta o clipe final (últimos N segundos) a partir do buffer de segmentos
+gravado por capture_camera.sh. Também pode ser usado via CLI.
 
-Chamado pelo handler de `POST /replay/{quadra_id}` quando o botão físico é
-pressionado (fase seguinte do projeto). Por enquanto, testável isoladamente
-via CLI ou pelo test/run_pipeline_test.sh.
-
-Race condition tratada (conforme já sinalizado no contexto do projeto):
-o segmento mais recente pode ainda estar sendo escrito pelo ffmpeg no
-momento exato do trigger. O `-f segment` do ffmpeg escreve um arquivo por
-vez (nunca dois em paralelo): assim que aparece um segmento NOVO no
-buffer, o anterior já foi fechado/finalizado. Por isso só o ÚLTIMO
-segmento (o mais recente por horário de início) é tratado como
-"possivelmente ainda sendo escrito" — todos os outros são considerados
-fechados independente de matemática de relógio. `safety_margin` continua
-existindo só como uma folga residual pequena (relógio do servidor vs.
-latência de escrita em disco), não é mais o que garante a segurança.
+O segmento mais recente pode ainda estar sendo escrito pelo ffmpeg. Como o
+`-f segment` escreve um arquivo por vez, só o último é tratado como aberto;
+`safety_margin` é só uma folga extra para diferença de relógio.
 """
 
 from __future__ import annotations
@@ -54,8 +42,7 @@ def list_closed_segments(
     safety_margin: float,
     now: datetime | None = None,
 ) -> list[Segment]:
-    """Lista, em ordem cronológica, os segmentos considerados fechados
-    (ou seja, o ffmpeg já rotacionou pra frente deles)."""
+    """Segmentos já fechados, em ordem cronológica."""
     now = now or datetime.now()
 
     all_segments = []
@@ -68,13 +55,10 @@ def list_closed_segments(
     if not all_segments:
         return []
 
-    # Só o segmento mais recente pode ainda estar sendo escrito — os
-    # demais já foram fechados pelo ffmpeg (ver docstring do módulo).
+    # Só o mais recente pode ainda estar em escrita.
     closed = all_segments[:-1]
 
-    # Folga residual pequena, não o `segment_time` inteiro: proteção extra
-    # contra relógio do servidor levemente adiantado/escrita em disco lenta,
-    # não é mais a defesa principal contra ler segmento em escrita.
+    # Folga pequena contra relógio adiantado ou escrita lenta em disco.
     cutoff = now - timedelta(seconds=safety_margin)
     return [s for s in closed if s.start_time <= cutoff]
 
@@ -82,22 +66,19 @@ def list_closed_segments(
 def select_segments_for_duration(
     segments: list[Segment], duration_seconds: float, segment_time: int
 ) -> list[Segment]:
-    """Pega, a partir do fim da lista (mais recentes primeiro), segmentos
-    fechados suficientes para cobrir >= duration_seconds de vídeo, com uma
-    folga de 1 segmento extra pra garantir margem no corte final."""
+    """Pega os segmentos mais recentes que cobrem `duration_seconds`, com folga."""
     if not segments:
         raise ClipGenerationError(
             "Nenhum segmento fechado disponível no buffer ainda "
             "(câmera muito recente ou buffer vazio)."
         )
 
-    needed = int(duration_seconds // segment_time) + 2  # +2 = folga de segurança
+    needed = int(duration_seconds // segment_time) + 2  # +2 de folga
     selected = segments[-needed:] if len(segments) > needed else segments
 
     covered = len(selected) * segment_time
     if covered < duration_seconds:
-        # Best-effort: usa o que tem, mas avisa — pode acontecer logo nos
-        # primeiros segundos de vida de uma câmera recém-ligada.
+        # Câmera recém-ligada: usa o que tem.
         print(
             f"[clip_generator] aviso: buffer só cobre ~{covered}s "
             f"(< {duration_seconds}s pedidos) — gerando clipe mais curto.",
@@ -115,10 +96,7 @@ def _run(cmd: list[str]) -> None:
 
 
 def probe_duration_seconds(path: Path) -> float:
-    """Duração real (segundos) de um clipe já gerado, via ffprobe. Usado
-    pelo registro no banco (PT-02) — com `-c copy` o corte cai no keyframe
-    mais próximo, então a duração real pode ser um pouco maior que
-    `duration_seconds` pedido (ver nota no README), não exatamente igual."""
+    """Duração real do clipe, via ffprobe (pode passar um pouco do pedido, por causa do keyframe)."""
     result = subprocess.run(
         [
             "ffprobe", "-v", "error",
@@ -134,10 +112,7 @@ def probe_duration_seconds(path: Path) -> float:
 
 
 def probe_resolution(path: Path) -> tuple[int, int]:
-    """Resolução (largura, altura) real de um vídeo, via ffprobe. Usado
-    tanto pra aplicar overlay (integrations/overlay.py) quanto pra decidir
-    o crop de orientação (integrations/orientation.py) — utilitário
-    compartilhado, não é específico de nenhum dos dois."""
+    """Resolução (largura, altura) de um vídeo, via ffprobe."""
     result = subprocess.run(
         [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -162,9 +137,7 @@ def generate_clip(
     safety_margin: float = 0.5,
     max_staleness_seconds: float | None = None,
 ) -> Path:
-    """Gera o clipe final dos últimos `duration_seconds` segundos de uma
-    quadra e grava no disco persistente (output_dir). Retorna o Path final.
-    """
+    """Gera o clipe dos últimos `duration_seconds` da quadra em `output_dir` e devolve o caminho."""
     buffer_dir = Path(buffer_root) / quadra_id
     if not buffer_dir.is_dir():
         raise ClipGenerationError(f"Diretório de buffer não existe: {buffer_dir}")
@@ -173,11 +146,8 @@ def generate_clip(
     closed = list_closed_segments(buffer_dir, safety_margin, now=now)
     selected = select_segments_for_duration(closed, duration_seconds, segment_time)
 
-    # Protege contra buffer "parado" (câmera travou/desconectou e o
-    # capture_camera.sh continua rodando, mas sem receber quadro novo):
-    # sem isso, o corte usaria os últimos segmentos DISPONÍVEIS, mesmo que
-    # estejam velhos, e devolveria sucesso com um clipe que não é o
-    # retroativo real do momento do trigger.
+    # Buffer parado (câmera travada com a captura rodando) não pode
+    # virar um clipe velho com status de sucesso.
     staleness = (now - selected[-1].start_time).total_seconds()
     max_staleness_seconds = (
         max_staleness_seconds
@@ -201,8 +171,7 @@ def generate_clip(
     final_clip = output_dir / f"{quadra_id}_{ts}.mp4"
 
     try:
-        # 1) Concatena os segmentos brutos selecionados (-c copy, rápido,
-        #    sem reencode) num arquivo temporário.
+        # 1) Concatena os segmentos num temporário (sem reencode).
         concat_list.write_text(
             "\n".join(f"file '{s.path.resolve()}'" for s in selected) + "\n"
         )
@@ -214,17 +183,9 @@ def generate_clip(
             ]
         )
 
-        # 2) Corte final: pega só os últimos `duration_seconds` a partir do
-        #    fim do arquivo concatenado. `-c copy` (sem reencode) — válido
-        #    porque as câmeras agora entregam H.264 nativamente (configurado
-        #    na própria câmera, ver README), então não existe mais o problema
-        #    de compatibilidade de reprodução que HEVC dava (motivo pelo qual
-        #    isso reencodava antes, ver nota no README). Trade-off aceito:
-        #    com stream copy o corte cai no keyframe mais próximo antes do
-        #    ponto pedido, não exatamente em `duration_seconds` — o clipe
-        #    final pode sair um pouco mais longo (nunca mais curto). Se
-        #    qualquer câmera voltar a entregar HEVC (ou outro codec não
-        #    suportado pelos players alvo), isso precisa voltar a reencodar.
+        # 2) Corte dos últimos `duration_seconds`. Com `-c copy` o corte cai
+        #    no keyframe anterior, então o clipe pode sair um pouco mais
+        #    longo. Só vale com câmeras em H.264; HEVC exigiria reencode.
         _run(
             [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
@@ -235,9 +196,7 @@ def generate_clip(
             ]
         )
     except Exception:
-        # Se o ffmpeg do corte final falhar no meio da escrita, não deixa um
-        # arquivo corrompido/incompleto pra trás em OUTPUT_DIR — esse diretório
-        # é servido publicamente em /clips e listado em /quadra/{quadra_id}.
+        # Não deixa clipe incompleto em OUTPUT_DIR (é servido publicamente).
         final_clip.unlink(missing_ok=True)
         raise
     finally:

@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""
-generate_camera_envs.py — lê config/cameras.json (fonte única de verdade
-sobre quais câmeras existem) e gera um arquivo .env por câmera, no formato
-que o unit systemd `replay-capture@.service` espera
-(/etc/replay-system/cameras/<quadra_id>.env).
+"""Gera um .env por câmera a partir de config/cameras.json, no formato do unit
+systemd `replay-capture@.service` (/etc/replay-system/cameras/<quadra_id>.env).
 
 Uso:
     python3 generate_camera_envs.py [--out-dir /etc/replay-system/cameras]

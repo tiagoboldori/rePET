@@ -1,13 +1,7 @@
-"""
-lara_client.py — cliente HTTP da API do Lara (PT-14/PT-15, ver
-PLANO_DE_ACAO.md v3 seção 6). O Lara é quem decide orientação, duração do
-clipe e logomarca; este módulo só fala com a rede, sem tomar nenhuma
-decisão de configuração — isso é papel de integrations/config_sync.py e
-integrations/upload_queue.py.
+"""Cliente HTTP da API da plataforma externa.
 
-Um erro por tipo de resposta, não por código HTTP cru: quem chama decide o
-que fazer com cada um (retentar, logar e seguir, etc.) sem precisar
-conhecer números de status.
+Só fala com a rede; as decisões ficam em config_sync.py e upload_queue.py.
+Cada tipo de resposta vira uma exceção própria, sem expor códigos HTTP a quem chama.
 """
 from __future__ import annotations
 
@@ -28,13 +22,11 @@ class LaraAuthError(LaraClientError):
 
 
 class LaraNotFoundError(LaraClientError):
-    """404 — external_id (de câmera ou clipe) desconhecido no Lara, ou
-    câmera inativa. Não é erro transitório: precisa de ação de cadastro."""
+    """404 — external_id desconhecido ou câmera inativa. Não é transitório."""
 
 
 class LaraValidationError(LaraClientError):
-    """422 com corpo — campo faltando, formato inválido ou data inválida.
-    Não adianta retentar sem corrigir o que foi enviado."""
+    """422 com corpo — dados inválidos; retentar sem corrigir não adianta."""
 
     def __init__(self, message: str, body: dict | None = None):
         super().__init__(message)
@@ -42,9 +34,7 @@ class LaraValidationError(LaraClientError):
 
 
 class LaraPayloadTooLargeError(LaraClientError):
-    """413, ou 422 com corpo vazio — limite do servidor web do Lara, não da
-    aplicação. Não se resolve retentando; precisa avisar a operação do
-    Lara."""
+    """413, ou 422 com corpo vazio — limite do servidor web; retentar não resolve."""
 
 
 class LaraRateLimitError(LaraClientError):
@@ -102,8 +92,7 @@ def _parse_camera(raw: dict, default_config_hash: str | None = None) -> CameraCo
 
 
 class LaraClient:
-    """Um cliente por processo é suficiente — mantém a sessão HTTP (keep-
-    alive) entre chamadas periódicas de pull/heartbeat/upload."""
+    """Um cliente por processo basta; a sessão HTTP é reaproveitada."""
 
     def __init__(self, base_url: str, token: str, timeout: float = 15.0):
         if not base_url:
@@ -160,12 +149,9 @@ class LaraClient:
         return self._request("GET", "/ping").json()
 
     def get_cameras(self) -> list[CameraConfig]:
-        """Resposta real do Lara: `{"config_hash": <hash do lote>, "cameras":
-        [...]}` — um hash só pra todas as câmeras, não um por câmera (o
-        contrato original presumia um `config_hash` dentro de cada item da
-        lista; a API de verdade não manda isso). Usamos o hash do lote como
-        `config_hash` de cada `CameraConfig`, exceto se algum item específico
-        vier com o seu próprio (resiliente a uma mudança futura no Lara)."""
+        """A API devolve `{"config_hash": ..., "cameras": [...]}` com um hash só
+        pro lote. Ele vira o `config_hash` de cada câmera, a menos que o item
+        traga o seu."""
         data = self._request("GET", "/cameras").json()
         if isinstance(data, dict):
             batch_hash = data.get("config_hash")
@@ -191,16 +177,9 @@ class LaraClient:
         duration_seconds: int,
         clip_external_id: str,
     ) -> UploadResult:
-        """`clip_external_id` é o identificador do clipe NESTE sistema
-        (Replay.id) — é o que torna o envio idempotente do lado do Lara
-        (RNF11). `recorded_at` é o instante do aperto do botão, não o do
-        envio (pode ter ficado tempo na fila local).
-
-        `recorded_at` chega aqui naive (`Replay.criado_em` vem de
-        `datetime.now()`), ou seja, no horário LOCAL do servidor
-        (America/Sao_Paulo). `astimezone()` num naive assume o fuso do
-        sistema e anexa o offset real (-03:00), então a string enviada é
-        inequívoca e independe do timezone do app do Lara."""
+        """`clip_external_id` é o Replay.id e torna o envio idempotente.
+        `recorded_at` é o instante do botão, não do envio."""
+        # naive vem de datetime.now(); astimezone() anexa o offset local
         if recorded_at.tzinfo is None:
             recorded_at = recorded_at.astimezone()
         with file_path.open("rb") as fh:
@@ -224,10 +203,7 @@ class LaraClient:
         )
 
     def download_to(self, url: str, dest: Path) -> None:
-        """Baixa um overlay (png/webm) do Lara para disco local. A URL já
-        contém o hash do conteúdo no nome — não precisa invalidar cache,
-        só baixar quando o caminho local ainda não existir (config_sync.py
-        decide isso comparando config_hash antes de chamar aqui)."""
+        """Baixa um overlay (png/webm) para disco, via arquivo .part."""
         dest.parent.mkdir(parents=True, exist_ok=True)
         resp = self._session.get(url, timeout=max(self._timeout, 30.0), stream=True)
         resp.raise_for_status()

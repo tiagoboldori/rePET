@@ -1,9 +1,4 @@
-"""
-heartbeat.py — sinal de vida periódico por câmera (S1, PLANO_DE_ACAO.md
-v3). Falha nunca interrompe nada além de logar (RNF9) — o heartbeat só
-alimenta o "último contato" do lado do Lara, usado pelo Marketing para
-descobrir câmera muda antes de o sócio reclamar.
-"""
+"""Sinal de vida periódico por câmera. Falha só gera log."""
 from __future__ import annotations
 
 from sqlmodel import Session, select

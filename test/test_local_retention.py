@@ -1,8 +1,4 @@
-"""
-test_local_retention.py — testes da retenção local dos clipes finais (S3,
-db/local_retention.py). Não é a entrega oficial ao sócio (essa é do
-Lara) — só evita que OUTPUT_DIR cresça sem limite.
-"""
+"""Testes da retenção local dos clipes finais (db/local_retention.py)."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -101,9 +97,7 @@ def test_purge_is_idempotent(tmp_path):
 
 
 def test_purge_ignores_lara_status(tmp_path):
-    """Expira por idade mesmo se nunca foi enviado ao Lara com sucesso —
-    não é a entrega oficial, a fila de envio já trata arquivo ausente
-    como falha não-crítica (RNF9)."""
+    """Expira por idade mesmo sem nunca ter sido enviado."""
     output_dir = tmp_path / "output"
     engine = _make_engine(tmp_path)
     with Session(engine) as session:

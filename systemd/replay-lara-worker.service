@@ -1,5 +1,5 @@
 [Unit]
-Description=Worker de integração com o Lara do rePET (sync/upload/heartbeat)
+Description=Worker de integração externa do rePET (sync/upload/heartbeat)
 After=network-online.target replay-api.service
 Wants=network-online.target
 

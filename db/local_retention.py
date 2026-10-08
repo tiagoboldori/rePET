@@ -1,19 +1,7 @@
-"""
-local_retention.py — retenção local dos clipes finais (S3, PLANO_DE_ACAO.md
-v3 seção 7.2/RNF5). **Não é a entrega oficial ao sócio** — essa é do Lara,
-que apaga sozinho em 7 dias. Isso aqui é só pra não deixar `OUTPUT_DIR`
-crescer sem limite: a página de teste interna (`GET /quadra/{id}`) e os
-endpoints `GET /api/replays/...` só existem pra depuração/validação local,
-não pro consumo do sócio (esse é o link que o Lara devolve no envio).
+"""Retenção local dos clipes: apaga arquivo e registro após LOCAL_RAW_RETENTION_DAYS.
 
-Baseado em `Replay.criado_em` (banco), não em mtime de arquivo — mesma
-fonte de verdade usada em todo o resto do sistema (idade real da
-gravação). Roda por idade, sem checar `lara_status`: um replay que nunca
-foi enviado com sucesso ao Lara (ex.: `external_id` nunca cadastrado lá,
-ficando preso na fila) ainda assim expira depois de
-`LOCAL_RAW_RETENTION_DAYS` — a fila de envio já trata "arquivo sumiu"
-como falha não-crítica (RNF9, ver integrations/upload_queue.py), não como
-bug.
+Usa `Replay.criado_em` (não o mtime) e não olha `lara_status`: replays que
+nunca foram enviados também expiram.
 """
 from __future__ import annotations
 
@@ -26,9 +14,8 @@ from db.models import Replay
 
 
 def purge_expired_replays(session: Session, output_dir: Path, retention_days: float) -> int:
-    """Remove (arquivo + registro) todo `Replay` mais velho que
-    `retention_days`. Retorna quantos foram removidos. Idempotente: nada
-    a fazer numa segunda passada até o próximo replay expirar."""
+    """Remove arquivo e registro de todo `Replay` mais velho que `retention_days`.
+    Retorna quantos foram removidos."""
     output_dir = Path(output_dir)
     cutoff = datetime.now() - timedelta(days=retention_days)
 

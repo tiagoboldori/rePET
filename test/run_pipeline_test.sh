@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 #
-# run_pipeline_test.sh — valida capture_camera.sh + clip_generator.py juntos,
-# de ponta a ponta, SEM precisar de câmera real. Usa uma fonte sintética
-# (ffmpeg lavfi testsrc) no lugar do RTSP.
-#
-# O que isso prova: que o pipeline "buffer contínuo -> corte dos últimos N
-# segundos -> arquivo final em disco" funciona a nível de código. A troca
-# pro RTSP real é só trocar a input_url (ver capture_camera.sh).
+# run_pipeline_test.sh — valida capture_camera.sh e clip_generator.py juntos,
+# com fonte sintética (ffmpeg lavfi) no lugar da câmera.
 #
 set -euo pipefail
 
@@ -19,7 +14,7 @@ BUFFER_ROOT="${WORKDIR}/buffer"
 OUTPUT_DIR="${WORKDIR}/output"
 SEGMENT_TIME=2
 CLIP_DURATION=35
-WARMUP_SECONDS=45   # > CLIP_DURATION + folga, pra garantir buffer suficiente
+WARMUP_SECONDS=45   # maior que CLIP_DURATION, pro buffer encher
 
 rm -rf "$WORKDIR"
 mkdir -p "$BUFFER_ROOT" "$OUTPUT_DIR"

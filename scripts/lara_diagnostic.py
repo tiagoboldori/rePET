@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""
-lara_diagnostic.py — diagnóstico da integração com o Lara (S2,
-PLANO_DE_ACAO.md v3): chama `/ping` e `/cameras` (ao vivo, não só o cache
-local) e mostra, por câmera, a configuração publicada AGORA pelo Lara ao
-lado da que está em vigor no cache local (útil pra flagrar sync
-atrasado/pendente) e se o overlay já foi baixado. Entrega explicitamente
-pedida pelo lado do Lara — só relata, não decide nada.
+"""Diagnóstico da integração: chama `/ping` e `/cameras` ao vivo e compara, por
+câmera, a config publicada com a do cache local e o estado do overlay.
+Só relata, não altera nada.
 
 Uso:
     python -m scripts.lara_diagnostic
@@ -33,7 +29,7 @@ def _overlay_status(quadra: Quadra) -> str:
 
 
 def main() -> None:
-    create_db_and_tables()  # idempotente — cobre rodar isolado, sem a API já ter subido
+    create_db_and_tables()  # idempotente; permite rodar sem a API
 
     try:
         client = LaraClient(config.LARA_BASE_URL, config.REPLAY_API_TOKEN)

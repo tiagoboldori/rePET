@@ -1,18 +1,8 @@
-"""
-migrate_cameras.py — sincroniza Local/Esporte/Quadra a partir de
-config/cameras.json (PT-10, "migração do registro em arquivo").
+"""Sincroniza Local/Esporte/Quadra a partir de config/cameras.json.
 
-Idempotente: chamado a cada start da API (ver api/main.py), upsert por
-identificador. cameras.json continua sendo a fonte editável — não existe
-ainda gerenciamento de câmeras/locais/esportes via API (isso é PT-16 e
-está deslocado pro ciclo seguinte pra locais/esportes, ver PLANO_DE_ACAO.md
-seção 7.4); até lá, mudar nome/esporte/local é editar cameras.json e
-reiniciar a API.
-
-Simplificação aceita por enquanto: cameras.json não tem nome nem
-observações de Local — Local.nome é derivado do local_id
-(`local_id.capitalize()`). O campo "esporte" é novo neste pacote; entradas
-sem ele caem em "indefinido".
+Roda a cada start da API (upsert por id); para mudar câmeras, edite o
+cameras.json e reinicie. Local.nome é derivado do local_id, e entradas sem
+"esporte" caem em "indefinido".
 """
 import json
 from pathlib import Path
@@ -33,9 +23,7 @@ def _upsert(session: Session, model: type, id_: str, **fields) -> None:
 
 
 def sync_cameras_from_file(session: Session, cameras_file: Path) -> int:
-    """Retorna o número de câmeras (quadras) processadas. Não faz nada
-    (retorna 0) se cameras_file ainda não existir — acontece em dev antes
-    de `cp cameras.example.json cameras.json`."""
+    """Retorna quantas câmeras foram processadas (0 se o arquivo não existir)."""
     if not cameras_file.is_file():
         return 0
 

@@ -1,16 +1,7 @@
-"""
-engine.py — engine SQLite + fábrica de sessões pra camada de persistência.
+"""Engine SQLite e fábrica de sessões. Lê DATABASE_URL direto do ambiente.
 
-Lê seu próprio env var (DATABASE_URL), no mesmo padrão que
-capture_camera.sh/clip_generator.py já usam pros deles: cada módulo se
-configura sozinho, sem depender de api/config.py (o worker assíncrono de
-aplicação de logo, que não é a API, também vai precisar deste módulo).
-
-Sem Alembic por enquanto: create_all() é idempotente e só cria o que
-falta. Enquanto o schema mudar durante o ciclo de desenvolvimento atual, o
-banco em .data/repet.db é descartável — apagar o arquivo e deixar recriar
-é o fluxo esperado. Migração de verdade só entra quando houver dados de
-produção a preservar.
+Sem Alembic: create_all() só cria o que falta, então mudanças de schema
+exigem apagar .data/repet.db.
 """
 import os
 from collections.abc import Generator
@@ -20,10 +11,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 
 def create_sqlite_engine(database_url: str):
-    """Cria um engine SQLite com WAL + foreign_keys habilitados. Usado tanto
-    pelo engine principal do módulo quanto pelos testes — pra que os testes
-    validem o mesmo comportamento de integridade referencial/índices que a
-    aplicação real tem, em vez de um engine "cru" sem os PRAGMAs."""
+    """Engine SQLite com WAL e foreign_keys ligados (usado também nos testes)."""
     eng = create_engine(database_url, connect_args={"check_same_thread": False})
 
     @event.listens_for(eng, "connect")
@@ -46,9 +34,8 @@ engine = (
 
 
 def create_db_and_tables() -> None:
-    # Import obrigatório aqui: SQLModel.metadata só conhece as classes que já
-    # foram importadas (corpo da classe executado) no momento do create_all;
-    # sem isso, create_all roda silenciosamente sem criar nenhuma tabela.
+    # O import precisa estar aqui: sem ele o metadata fica vazio e
+    # create_all não cria nenhuma tabela, sem erro.
     from db import models  # noqa: F401
 
     SQLModel.metadata.create_all(engine)

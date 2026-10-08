@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""
-lara_worker.py — processo único com as três rotinas de fundo da
-integração com o Lara (PT-14/PT-15, PLANO_DE_ACAO.md v3): sincronização de
-configuração, fila de envio de clipes e heartbeat. Nenhuma delas roda no
-caminho do acionamento do botão (RNF3/RNF9) — cada uma em sua própria
-thread, com seu próprio intervalo e sua própria sessão de banco a cada
-passada (SQLite/SQLModel não compartilha sessão entre threads).
-
-Se `LARA_BASE_URL`/`REPLAY_API_TOKEN` não estiverem configurados, o
-processo avisa e sai — não tem sentido subir sem eles (mesmo raciocínio de
-`ffmpeg` obrigatório no start.sh).
+"""Processo com as rotinas de fundo da integração: sincronização de config, fila
+de envio e heartbeat. Cada uma roda em sua thread, com sessão de banco própria.
+Sai se LARA_BASE_URL/REPLAY_API_TOKEN não estiverem configurados.
 
 Uso:
     python -m scripts.lara_worker
@@ -34,7 +26,7 @@ def _loop(name: str, interval: float, fn: Callable[[Session], None]) -> None:
         try:
             with Session(engine) as session:
                 fn(session)
-        except Exception as exc:  # noqa: BLE001 — worker de fundo não pode morrer por uma falha isolada
+        except Exception as exc:  # noqa: BLE001 — não deixa o worker morrer
             print(f"[lara-worker:{name}] erro inesperado: {exc}")
         time.sleep(interval)
 

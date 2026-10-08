@@ -1,15 +1,6 @@
-"""
-orientation.py — aplicação mecânica da orientação publicada pelo Lara no
-clipe (`Quadra.orientation`: "vertical" 9:16 ou "horizontal" 16:9, ver
-prompt do Lara / PLANO_DE_ACAO.md v3 seção 6). Este módulo nunca decide
-nada — o Lara já resolveu qual orientação vale pra quadra, a única
-decisão mecânica daqui é COMO chegar nesse aspect ratio a partir do que a
-câmera entrega: corte centralizado (resolução e FPS continuam sendo
-decisão nossa, o prompt só fala de orientação).
+"""Corta o clipe para o aspect ratio da orientação da quadra (vertical 9:16 ou horizontal 16:9).
 
-Sem `Quadra.orientation` ainda sincronizada (`None`) ou com valor
-desconhecido, não mexe no clipe — mesmo princípio de "cai no default até
-sincronizar" já usado por `clip_seconds` em `api/main.py`.
+Sem orientação sincronizada ou com valor desconhecido, o clipe não é alterado.
 """
 from __future__ import annotations
 
@@ -19,9 +10,7 @@ from pathlib import Path
 from clipper.clip_generator import probe_resolution
 from db.models import Quadra
 
-# Diferença de aspect ratio pequena o bastante pra não valer o reencode
-# (câmera já entrega quase exatamente o alvo — ex.: 16:9 nativo pedido
-# como "horizontal").
+# Diferença de aspect ratio pequena demais pra valer o reencode.
 _TOLERANCE = 0.01
 
 _TARGET_RATIO = {
@@ -35,12 +24,7 @@ class OrientationApplicationError(RuntimeError):
 
 
 def orientation_applies(orientation: str | None) -> bool:
-    """Decisão pura e barata (sem ffprobe): True só se `orientation` for
-    um valor reconhecido (vertical/horizontal). Usado por
-    `integrations/render.py` pra decidir se vale a pena sondar a
-    resolução do clipe — sem isso, `render_clip` chamaria `probe_resolution`
-    incondicionalmente, mesmo pra quadra sem orientação sincronizada
-    ainda (regressão real encontrada ao escrever os testes deste módulo)."""
+    """True se a orientação é reconhecida; evita ffprobe desnecessário em render.py."""
     return orientation in _TARGET_RATIO
 
 
@@ -58,12 +42,7 @@ def _even(value: float) -> int:
 
 
 def compute_crop(width: int, height: int, orientation: str | None) -> tuple[int, int] | None:
-    """Decisão pura (sem ffmpeg): devolve o (crop_w, crop_h) a aplicar, ou
-    `None` se nada precisa mudar (orientação não sincronizada/desconhecida,
-    ou o frame já está dentro da tolerância do aspect ratio alvo). Extraído
-    de `apply_orientation` pra ser reutilizável por `integrations/render.py`
-    (fusão orientação+overlay num só passe de ffmpeg quando os dois se
-    aplicam, ver docstring de lá)."""
+    """Devolve (crop_w, crop_h), ou `None` se não há nada a cortar."""
     target_ratio = _TARGET_RATIO.get(orientation)
     if target_ratio is None:
         return None
@@ -82,12 +61,8 @@ def compute_crop(width: int, height: int, orientation: str | None) -> tuple[int,
 
 
 def apply_orientation(clip_path: Path, quadra: Quadra) -> Path:
-    """Se a orientação da quadra ainda não foi sincronizada, for
-    desconhecida, ou o clipe já está (dentro da tolerância) no aspect
-    ratio pedido, devolve `clip_path` sem tocar nele (sem reencode — caso
-    comum quando a câmera já é nativamente do formato certo). Senão,
-    corta centralizado pro aspect ratio alvo e devolve o novo arquivo
-    (`<clip>_oriented.mp4`)."""
+    """Devolve `clip_path` intacto se não precisa cortar; senão gera
+    `<clip>_oriented.mp4` com corte centralizado."""
     if not orientation_applies(quadra.orientation):
         return clip_path
 

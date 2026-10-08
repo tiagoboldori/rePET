@@ -1,166 +1,96 @@
-# Replay System — backend central
+# rePET — motor de captura e envio de replays
 
-Sistema de replay de vídeo para quadras esportivas. Cobre o **backend
-central** (100% centralizado — buffer, corte de clipe, API e página pública
-por quadra) e o **botão físico** (ESPHome), já validados de ponta a ponta
-com hardware e câmera reais em 2026-09-15.
+Motor de replay de vídeo para quadras esportivas. Grava continuamente as
+câmeras das quadras, e quando o botão físico da quadra é apertado **corta
+os últimos ~35 segundos**, aplica orientação, logo e música de fundo e
+**envia o clipe por HTTP a uma plataforma externa** (sistema de gestão do
+clube), que é quem entrega o vídeo ao sócio.
 
-> **Escopo deste repositório (definido em 2026-09-17): isto é só o motor.**
-> Este projeto cobre captura, corte de clipe e uma **API de gerenciamento**
-> (endpoints JSON pra um admin consultar/alterar configuração do motor —
-> câmeras, retenção, duração de clipe, etc). **Não vai existir página de
-> admin aqui** — nenhuma UI web é planejada neste repositório. Qualquer
-> painel/frontend que consuma essa API de gerenciamento é responsabilidade
-> de outra equipe/projeto. Isso vale tanto pro futuro `/admin` quanto pra
-> qualquer nova funcionalidade de gerenciamento que for adicionada depois.
+> **Este repositório não é mais o backend central.** Ele é só o *motor*:
+> captura, corte, processamento e envio. Decisões de produto — orientação
+> do vídeo, duração do clipe, logomarca, entrega e retenção ao sócio —
+> pertencem à plataforma externa; aqui só se consulta essa configuração, aplica-se
+> mecanicamente e envia-se o resultado. Não existe (nem vai existir) UI web
+> de administração neste repositório; qualquer painel é de outro projeto.
 
-O botão fala **direto com esta API** via HTTP — não existe Home Assistant
-no meio dessa chamada (decisão revisada; ver "Cadeia do botão" abaixo). O
-firmware de bring-up usado no primeiro teste foi um devkit **ESP8266**
-("NodeMCU V3") só porque já estava disponível — o hardware definitivo
-planejado é um devkit **ESP32 + módulo Ethernet W5500**, ainda pendente de
-compra/novo bring-up.
+## Como funciona
 
-## Visão geral: o que está rodando e quando
-
-Existem duas coisas bem separadas, com ciclos de vida diferentes:
-
-1. **Captura contínua (nunca para, não depende de evento nenhum).**
-   Um processo `ffmpeg` por câmera fica gravando 24/7, cortando o vídeo
-   bruto em segmentos de 2s dentro do **buffer**. Isso é o que permite
-   existir um "últimos 35 segundos" pra olhar pra trás a qualquer momento.
-   Roda como um serviço systemd por câmera (`replay-capture@<quadra_id>`).
-
-2. **Corte do clipe final (acionado por evento).**
-   Só acontece quando alguém chama `POST /replay/{quadra_id}` na API.
-   Esse é o evento — hoje simulado manualmente ou via `curl`; na versão
-   final, disparado pelo firmware ESPHome direto quando o botão físico da
-   quadra é pressionado (sem Home Assistant no meio, ver abaixo). Cada
-   chamada corta os últimos N segundos **a partir do instante exato em
-   que a chamada chega** e grava um arquivo novo no disco persistente.
-
-Cadeia do botão (validada com hardware real em 2026-09-15):
 ```
-botão físico (GPIO) --> ESP (ESPHome, http_request.post) --> POST /replay/{quadra_id}  <- ESTE repositório
+botão físico (ESP32) ──HTTP──> POST /replay/{quadra_id}
+                                      │
+   ffmpeg 24/7 (por câmera)           ▼
+   RTSP ─> buffer em segmentos ─> corte dos últimos N s (-c copy)
+                                      │
+                                      ▼  registro Replay (SQLite)
+                         worker de integração (fila de envio)
+              orientação + overlay ─> música ─> POST /cameras/{id}/videos
+                                      │
+                                      ▼
+                           plataforma externa
 ```
-Sem Home Assistant no meio — o firmware ESPHome chama este endpoint
-diretamente (`quadra_id` fixo por botão, hardcoded no YAML de cada
-dispositivo). Uma instância de Home Assistant já existe na infraestrutura
-do usuário, mas não faz parte desse fluxo.
 
-### Hardware do hub de botões
+Dois ciclos de vida independentes:
 
-| | Placa | Status |
-|---|---|---|
-| **Usada no bring-up (2026-09-15)** | Devkit **ESP8266** vendido como "NodeMCU V3" (chip `ESP8266MOD`) | Só validou a lógica software (Wi-Fi + HTTP + GPIO). **Não é a placa definitiva** — ESP8266 não roda o componente `ethernet:` do ESPHome (é ESP32-only), então não suporta o módulo Ethernet planejado. |
-| **Definitiva (planejada, ainda não comprada)** | Devkit **ESP32** genérico (board ESPHome `esp32dev`, tipicamente vendido como "ESP32 DevKitC" ou "NodeMCU-32S", chip `ESP-WROOM-32`) + módulo Ethernet **W5500** por SPI | Suporta `ethernet:` do ESPHome nativamente; ver orçamento de pinos abaixo pra confirmar que cabe 1 hub por local com até 8 botões. |
+1. **Captura contínua** — um `ffmpeg` por câmera grava 24/7 segmentos de 2s
+   no buffer (tmpfs em produção, retenção fixa de 2 min). É isso que
+   permite olhar "os últimos 35s" a qualquer momento.
+2. **Corte por evento** — `POST /replay/{quadra_id}` corta os últimos N
+   segundos a partir do instante da chamada e grava o clipe bruto em disco.
+   Um worker assíncrono então processa e envia à plataforma externa, com retentativa.
 
-**Confirmação: cabe 8 botões + W5500 na mesma placa, com folga.** Mapeamento
-de ligações definitivo (substitui a sugestão de pinos de 2026-09-15, nunca
-soldada — este é o que vale, confirmado 2026-09-22). Placa: ESP32 DevKit V1
-(30 pinos, módulo WROOM-32) + módulo Ethernet W5500 por SPI.
+O botão chama a API **direto**, sem Home Assistant no meio (`quadra_id`
+fixo por botão no firmware ESPHome).
 
-**Módulo de rede (fileira direita), 7 fios — MISO e MOSI não se cruzam
-(nomes já do ponto de vista do mestre):**
+## Integração com plataforma externa
 
-| Pino da DevKit | GPIO | Pino do W5500 | Rótulos alternativos |
-|---|---|---|---|
-| D19 | 19 | MISO | SO, SDO |
-| D18 | 18 | MOSI | SI, SDI |
-| D5 | 5 | SCS | CS, NSS, SCSn |
-| TX2 | 17 | SCLK | SCK, CLK |
-| RX2 | 16 | RST | RSTn, RESET |
-| GND | — | GND | — |
-| 3V3 | — | 3V3 | VCC, V3.3 |
-| — | — | INT | deixar desconectado |
+Toda a integração fica em `integrations/` e roda no worker
+`scripts/lara_worker.py` (endereço em `LARA_BASE_URL`), com três rotinas de fundo:
 
-**Botões (fileira esquerda), pull-up interno (`INPUT_PULLUP`) — nenhum
-resistor externo, cada botão liga entre o seu GPIO e o trilho de GND:**
+| Rotina | O que faz |
+|---|---|
+| **Sync de config** (`config_sync.py`) | `GET /cameras`, com cache por `config_hash`; baixa overlay novo e atualiza a `Quadra` local (orientação, duração, overlay) |
+| **Fila de envio** (`upload_queue.py`) | Processa cada `Replay` pendente: render → música → upload. Idempotente por `external_id` (= `Replay.id`) |
+| **Heartbeat** (`heartbeat.py`) | Avisa periodicamente que cada câmera está viva; falha só loga |
 
-| Quadra | Pino da DevKit | GPIO |
-|---|---|---|
-| 1 | D32 | 32 |
-| 2 | D33 | 33 |
-| 3 | D25 | 25 |
-| 4 | D26 | 26 |
-| 5 | D27 | 27 |
-| 6 | D14 | 14 |
-| 7 | D12 | 12 |
-| 8 | D13 | 13 |
+**Processamento antes do envio**, nesta ordem:
 
-Pinos livres como reserva: `D4, D21, D22, D23`. `VP, VN, D34, D35` são só
-entrada, sem pull-up interno — inúteis pra botão sem resistor externo.
+1. **Orientação + overlay** (`render.py`, usa `orientation.py` e
+   `overlay.py`) — crop centralizado pro aspect ratio pedido
+   (`vertical` = 9:16, `horizontal` = 16:9) e logo queimada por cima.
+   Quando os dois se aplicam (caso comum) é **um único passe de ffmpeg**.
+   Se nenhum se aplica, não há reencode.
+2. **Música de fundo** (`audio.py`) — decisão local (não vem da plataforma):
+   sorteia uma faixa de `assets/music/`, usa o trecho inicial na duração
+   do clipe, com fade in/out. Sem faixas, é no-op. As câmeras não têm
+   áudio, então só entra a trilha.
 
-**Pontos de atenção na montagem:**
-- **GPIO12 (quadra 7) — nunca colocar pull-up externo.** É pino de
-  strapping: em nível alto no reset, seleciona flash de 1,8V e a placa não
-  inicia. Com botão ao GND e só o pull-up interno, o pino fica baixo no
-  boot (estado correto); um resistor físico pra 3V3 quebraria isso. O
-  ESPHome emite aviso de strapping na compilação — é esperado, não é erro.
-- **Capacitor de desacoplamento** entre 3V3 e GND, o mais próximo possível
-  do módulo de rede (ponte lateral, não em série na alimentação). O W5500
-  puxa até ~150mA em rajadas ao transmitir; sem capacitor a tensão afunda
-  no pino e causa queda de link — falha que não aparece em bancada, só em
-  produção. Usar 100nF cerâmico + 10µF eletrolítico (faixa marcada no GND);
-  com o módulo fixado fora da placa, o de 10µF é o mais importante.
-- **Alimentação do módulo:** o regulador da DevKit já alimenta o ESP32; se
-  houver um LM2596 na placa, alimentar o módulo de rede por ele. Terra
-  comum obrigatório.
-- **Tensão do módulo:** conferir antes de energizar — módulos pequenos
-  (tipo W5500 Lite) são exclusivamente 3,3V e queimam de forma irreversível
-  com 5V; módulos maiores, com regulador visível, aceitam 5V.
-- **WROOM vs WROVER:** GPIO16/GPIO17 (RST/SCLK acima) são livres no
-  WROOM-32, mas consumidos pela PSRAM no WROVER (e a lógica do GPIO12
-  também se inverte nele) — conferir a serigrafia da placa antes de gravar.
-- **Identificação do controlador:** a marcação `HR911105A` é do conector
-  RJ45, não do controlador — aparece igual em módulos W5500 e ENC28J60.
-  Conferir o chip quadrado ao lado do conector. Se for ENC28J60 (evitar,
-  ver decisão de arquitetura), `interrupt_pin` passa a ser obrigatório
-  (GPIO35, com resistor de 10kΩ pra 3V3).
-- **Velocidade do SPI:** default do ESPHome é 26,67MHz; em instabilidade,
-  reduzir `clock_speed` (mínimo 8MHz) antes de suspeitar do hardware.
-  Manter os fios de SPI curtos (~5cm).
-- **Erros mais prováveis na conferência:** trocar MISO com MOSI; confundir
-  TX2 com RX2 (vizinhos, a troca inverte SCLK e RESET); nos botões, um fio
-  uma linha fora troca a quadra silenciosamente — o botão funciona e
-  reporta a quadra errada.
+O arquivo final fica em `Replay.arquivo_processado` e é o que é enviado.
 
-**Validação antes da solda definitiva:** (1) montar em protoboard com o
-módulo de rede e **um** botão, compilar o YAML e confirmar que a Ethernet
-sobe com o IP fixo; (2) energizar com o botão da quadra 7 (GPIO12)
-**pressionado** — deve iniciar normalmente; (3) só então replicar pros 8
-botões e passar à perfboard.
+**Envio:** `POST {LARA_BASE_URL}/cameras/{id}/videos` (multipart) com
+`Authorization: Bearer <REPLAY_API_TOKEN>`, `recorded_at` (instante do
+botão, em horário local com offset explícito, ex. `-03:00`),
+`duration_seconds` e `external_id`. Falha transitória (401/403/404/429/5xx/
+rede) é retentada com backoff exponencial por replay (10s, 20s, 40s… teto
+de 10 min); 422/413 são falhas definitivas, sem retry.
 
-## Onde os vídeos ficam salvos
+Diagnóstico ao vivo (chama `/ping` e `/cameras` e compara com o cache local):
 
-Dois lugares, com papéis e ciclos de vida diferentes — configuráveis por
-variável de ambiente (ver `api/config.py`):
-
-| | Variável | Default | O que tem | Ciclo de vida |
-|---|---|---|---|---|
-| **Buffer bruto** | `BUFFER_ROOT` | `/var/replay` | Segmentos de 2s contínuos, um subdiretório por `quadra_id` (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) | Descartável — retenção fixa de **2 minutos**, nada mais (`scripts/cleanup_segments.sh`, default `max_age_min=2`). Em produção fica em **tmpfs** (RAM), não em disco. |
-| **Clipes finais** | `OUTPUT_DIR` | `/var/replay/output` | Um arquivo por evento de replay: `<quadra_id>_<timestamp>.mp4` (e `<...>_oriented.mp4`/`_overlay.mp4`/`_oriented_overlay.mp4` quando o worker do Lara já processou orientação e/ou logo, ver `Replay.arquivo_processado`) | Persistente, em disco de verdade. Retenção local de `LOCAL_RAW_RETENTION_DAYS` dias (default 3, `scripts/local_retention_loop.py`, checa a cada 1h) — **não é a entrega oficial ao sócio** (essa é do Lara, 7 dias); é só pra essa página de teste interna e pros endpoints `/api/replays/...` não crescerem sem limite. |
-
-O `OUTPUT_DIR` é montado pela API em `/clips` (via `StaticFiles`), então
-todo clipe final já sai acessível publicamente em:
+```bash
+python -m scripts.lara_diagnostic
 ```
-GET /clips/<quadra_id>_<timestamp>.mp4
+
+Sem `LARA_BASE_URL`/`REPLAY_API_TOKEN`, o worker não sobe; captura, corte
+e página de teste continuam funcionando normalmente.
+
+## Câmeras
+
+Fonte única: **`config/cameras.json`** (gitignored — contém credencial RTSP;
+o repositório é público, **nunca commitar credencial real**). Parta do
+template:
+
+```bash
+cp config/cameras.example.json config/cameras.json   # editar input_url reais
 ```
-Essa é a mesma URL que a página pública da quadra (`GET /quadra/{quadra_id}`,
-ver seção "Endpoint da API") usa pra listar/exibir os replays.
-
-## Como configurar quais câmeras são capturadas
-
-Fonte única de verdade: **`config/cameras.json`**.
-
-> **Este arquivo tem credencial RTSP real e está no `.gitignore`** — o
-> repositório é público, nunca commitar `config/cameras.json` de verdade.
-> Use `config/cameras.example.json` (esse sim commitado, com placeholders)
-> como ponto de partida:
-> ```bash
-> cp config/cameras.example.json config/cameras.json
-> # depois edite config/cameras.json com os input_url reais
-> ```
 
 ```json
 {
@@ -172,678 +102,207 @@ Fonte única de verdade: **`config/cameras.json`**.
 }
 ```
 
-Esse arquivo é usado em três lugares:
+Usado pela API (valida `quadra_id`), por `scripts/generate_camera_envs.py`
+(gera os `.env` de systemd por câmera em `/etc/replay-system/cameras/` —
+não edite esses à mão) e por `db/migrate_cameras.py` (sincroniza
+`Local`/`Esporte`/`Quadra` no banco a cada start da API, idempotente).
 
-1. **Pela API**, pra validar se um `quadra_id` recebido no `POST /replay/{id}`
-   é conhecido (404 se não estiver na lista).
-2. **Por `scripts/generate_camera_envs.py`**, que lê `cameras.json` e gera
-   automaticamente um `.env` por câmera em `/etc/replay-system/cameras/`
-   — é esse `.env` que o unit systemd `replay-capture@.service` usa pra
-   saber o RTSP daquela câmera.
-3. **Por `db/migrate_cameras.py`** (PT-10), que sincroniza `Local`/`Esporte`/
-   `Quadra` no banco a partir deste arquivo — roda automaticamente (idempotente)
-   toda vez que a API sobe. `esporte` é obrigatório pra isso; entradas sem
-   esse campo caem no esporte `"indefinido"`. `Local.nome` hoje é só derivado
-   de `local_id` (capitalizado) — não tem outro nome/observação na fonte;
-   gerenciamento de locais/esportes via API está no ciclo seguinte (ver
-   `PLANO_DE_ACAO.md`).
-
-Fluxo pra adicionar/trocar uma câmera:
+Adicionar/trocar câmera:
 
 ```bash
-# 1) editar config/cameras.json (adicionar/alterar a entrada da câmera)
-# 2) regerar os .env a partir do arquivo central:
+# 1) editar config/cameras.json
 python3 scripts/generate_camera_envs.py --out-dir /etc/replay-system/cameras
-# 3) (re)ativar o serviço systemd daquela câmera:
 systemctl daemon-reload
 systemctl enable --now replay-capture@loc1-quadra1
 ```
 
-Você NUNCA edita os `.env` de `/etc/replay-system/cameras/` diretamente à
-mão em produção — eles são gerados a partir do `cameras.json`. Isso evita
-a câmera ficar configurada em dois lugares que podem divergir.
+**Câmera de produção: HiLook H.265+.** Pré-requisito: configurar o stream
+para **H.264** na própria câmera (o corte usa `-c copy`, sem reencode, e em
+HEVC o clipe final tem problema de reprodução). Validar com `ffprobe` no
+RTSP (`codec_name=h264`) — o software não valida isso.
 
-### Câmera de produção
+## API
 
-**Definida em 2026-09-17: HiLook H.265+.** As câmeras usadas nos testes até
-aqui (`.63`/`.86`, Dahua/OEM) foram só por conveniência — não são o hardware
-final, não estão de fato apontadas pra uma quadra.
+Público (sem autenticação):
 
-Checklist ao configurar uma câmera HiLook real:
-- **Trocar o codec de vídeo pra H.264** na aba de vídeo da própria câmera —
-  "H.265+" é só o padrão de fábrica da linha, não uma trava; a câmera deixa
-  escolher H.264/H.265/H.265+ por stream. Isso é pré-requisito: todo o
-  pipeline de corte hoje depende de `-c copy` (sem reencode), que só
-  funciona porque a câmera entrega H.264 nativo (ver nota em "Endpoint da
-  API" acima) — em HEVC o clipe final volta a ter problema de reprodução.
-- Validar com `ffprobe` no RTSP depois de configurar (`codec_name=h264`),
-  não confiar só na configuração salva na interface web.
-- HiLook/Hikvision têm uma função nativa de logo (**Picture Overlay**,
-  `Configuration > Image > Picture Overlay`) — ver seção "Funcionalidades
-  futuras" abaixo pra detalhes e limitações.
+| Endpoint | Descrição |
+|---|---|
+| `POST /replay/{quadra_id}` | Aciona o corte. `404` quadra desconhecida; `429` se a mesma quadra foi acionada há menos de `TRIGGER_COOLDOWN_SECONDS` (15s); `500` se o corte falhar (buffer vazio ou parado — ver `MAX_STALENESS_SECONDS`); `200` com `{quadra_id, clip_filename, clip_url}` |
+| `GET /api/replays/{replay_id}` | Metadados do replay, incluindo estado do envio |
+| `GET /api/replays/{replay_id}/media` | Vídeo (prefere o processado). Range/206 e ETag; `Cache-Control: no-cache` |
+| `GET /api/quadras/{quadra_id}/replays` | Listagem paginada (`page`, `page_size` ≤ 100), mais recente primeiro |
+| `GET /quadra/{quadra_id}` | Página HTML simples de teste interno com os replays da quadra |
+| `GET /clips/<arquivo>.mp4` | Clipe bruto (StaticFiles sobre `OUTPUT_DIR`) |
+| `GET /health` | Healthcheck |
 
-## Endpoint da API
+Protegido por HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default —
+sem configurar, responde `401` sempre):
 
-```
-POST /replay/{quadra_id}
-```
-- Sem corpo — o `quadra_id` na URL já é toda a informação necessária.
-- `404` se `quadra_id` não estiver em `config/cameras.json`.
-- `429` se essa MESMA quadra já foi acionada há menos de `TRIGGER_COOLDOWN_SECONDS` (default 15s) — protege contra clique duplo/repique do botão físico. Outras quadras não são afetadas (cooldown é por `quadra_id`). Resposta inclui quanto falta esperar:
-  ```json
-  {"detail": "Aguarde mais 9.7s antes de acionar 'loc1-quadra1' de novo (intervalo mínimo: 15s)."}
-  ```
-- `500` se o corte falhar (ex.: buffer vazio/câmera não está gravando ainda).
-- `200` com:
-  ```json
-  {
-    "quadra_id": "loc1-quadra1",
-    "clip_filename": "loc1-quadra1_20260915165232.mp4",
-    "clip_url": "/clips/loc1-quadra1_20260915165232.mp4"
-  }
-  ```
+| Endpoint | Descrição |
+|---|---|
+| `DELETE /api/replays/{replay_id}` | Remove registro e arquivos (`204`; `404` se não existe) |
 
-```
-GET /quadra/{quadra_id}   -> página pública (HTML, sem login) listando os
-                              replays dessa quadra, mais recente primeiro,
-                              com <video controls> embutido. Lê direto do
-                              disco (OUTPUT_DIR) — não depende de Postgres.
-                              404 se quadra_id não estiver em cameras.json.
-GET /clips/<arquivo>.mp4   -> serve o clipe final (StaticFiles sobre OUTPUT_DIR)
-GET /health                -> healthcheck simples
-```
+O corte usa `-c copy`, então cai no keyframe anterior ao ponto pedido: o
+clipe pode sair um pouco mais longo que `CLIP_DURATION_SECONDS`, nunca
+mais curto. Clientes (inclusive o firmware) devem usar timeout generoso
+(15s no ESPHome).
 
-Endpoints da API de consumo (M5/M6/M7, `/api/...`, público — sem HTTP
-Basic, mesmo nível de acesso que `/quadra/{quadra_id}` e `/clips/*` já
-têm hoje):
+## Configuração
 
-```
-GET /api/replays/{replay_id}         -> metadados do replay pelo id (não
-                                         pelo nome do arquivo): quadra_id,
-                                         criado_em, duração, tamanho,
-                                         media_url, estado de envio ao
-                                         Lara. 404 se o id não existir.
-GET /api/replays/{replay_id}/media   -> entrega o vídeo em si. Prefere
-                                         Replay.arquivo_processado (saída
-                                         de integrations/render.py e/ou
-                                         audio.py — orientação, overlay
-                                         e/ou música) quando já existir,
-                                         senão o bruto. Suporta requisições
-                                         parciais (Range/206, Accept-Ranges,
-                                         ETag) nativamente via FileResponse
-                                         do Starlette — RNF1 sem código
-                                         extra. `Cache-Control: no-cache`
-                                         (não max-age): o arquivo servido
-                                         pra um replay_id troca pouco
-                                         depois da criação, quando o
-                                         processamento assíncrono termina —
-                                         com max-age o NAVEGADOR nem
-                                         reconsultava o servidor dentro da
-                                         janela, servindo o bruto em cache
-                                         por até 1h mesmo já processado
-                                         (bug real visto na prática,
-                                         2026-09-22, corrigido). no-cache
-                                         força revalidação via ETag a cada
-                                         carregamento (304 se não mudou).
-GET /api/quadras/{quadra_id}/replays -> listagem paginada dos replays da
-                                         quadra, mais recente primeiro.
-                                         Query params `page` (default 1)
-                                         e `page_size` (default 20, teto
-                                         100). Resposta:
-                                         {quadra_id, page, page_size,
-                                          total, items: [...]}.
-                                         404 se quadra_id não existir.
-```
-
-Endpoint de gerenciamento (M8, protegido por HTTP Basic — M11):
-
-```
-DELETE /api/replays/{replay_id}      -> remove o registro e os arquivos
-                                         (bruto e com overlay, se houver)
-                                         de um replay. Única medida de
-                                         moderação disponível — o
-                                         conteúdo é público e sem
-                                         controle de acesso na
-                                         visualização. `401` sem
-                                         credencial válida (exige
-                                         ADMIN_USERNAME/ADMIN_PASSWORD
-                                         configurados — sem default,
-                                         ver tabela abaixo). `204` em
-                                         caso de sucesso, `404` se o
-                                         replay não existir.
-```
-
-Variáveis de ambiente que a API lê (`api/config.py`), todas com default
-razoável pra dev local:
+Configuração persistente: `cp .env.example .env`, preencher e rodar
+`./start.sh` (carrega o `.env` sem sobrescrever o que já estiver exportado).
+`.env` é gitignored. Em produção com systemd, use o `EnvironmentFile`.
+`BUFFER_ROOT`, `OUTPUT_DIR`, `CAMERAS_FILE`, `DATABASE_URL` e
+`SEGMENT_TIME` são fixados pelo `start.sh` em dev (tudo em `.data/`).
 
 | Variável | Default | Descrição |
 |---|---|---|
-| `BUFFER_ROOT` | `/var/replay` | Onde estão os segmentos brutos |
-| `OUTPUT_DIR` | `/var/replay/output` | Onde gravar/servir os clipes finais |
-| `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras conhecidas |
-| `CLIP_DURATION_SECONDS` | `35` | Duração do clipe cortado |
-| `SEGMENT_TIME` | `2` | Precisa bater com o valor usado por `capture_camera.sh` |
-| `SAFETY_MARGIN` | `0.5` | Margem (segundos) pra considerar um segmento "fechado" |
-| `MAX_STALENESS_SECONDS` | `3*SEGMENT_TIME + SAFETY_MARGIN + 5` (~13s) | Se o segmento fechado mais recente for mais velho que isso, o corte falha (`500`) em vez de devolver um clipe com conteúdo velho — protege contra câmera travada/desconectada com o processo de captura ainda de pé (ver nota abaixo) |
-| `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo entre dois acionamentos da MESMA quadra — uma segunda chamada antes disso recebe `429` em vez de disparar outro corte |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio (sem default de propósito) | Credencial HTTP Basic da superfície de gerenciamento (M11) — hoje só protege `DELETE /api/replays/{id}`. Sem configurar, o endpoint recusa toda requisição com `401` (nunca cai num usuário/senha padrão) |
+| `LARA_BASE_URL` | — (obrigatória p/ integração) | Base da API da plataforma externa, ex. `https://plataforma.example/api/replay` |
+| `REPLAY_API_TOKEN` | — (obrigatória p/ integração) | Token Sanctum, gerado com `php artisan replay:token` na plataforma |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Credencial do `DELETE`; vazio = sempre `401` |
+| `BUFFER_ROOT` | `/var/replay` | Segmentos brutos (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) |
+| `OUTPUT_DIR` | `/var/replay/output` | Clipes finais (`<quadra_id>_<timestamp>.mp4`, mais variantes `_oriented`/`_overlay`) |
+| `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras |
+| `DATABASE_URL` | `sqlite:///.data/repet.db` | Lida por `db/engine.py` |
+| `CLIP_DURATION_SECONDS` | `35` | Duração do corte |
+| `SEGMENT_TIME` | `2` | Deve bater com `capture_camera.sh` |
+| `SAFETY_MARGIN` | `0.5` | Margem (s) para considerar um segmento fechado |
+| `MAX_STALENESS_SECONDS` | ~13 | Segmento fechado mais velho que isso ⇒ corte falha (`500`) em vez de entregar clipe velho (câmera travada) |
+| `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo por quadra |
+| `OVERLAY_CACHE_DIR` | `/var/replay/overlays` | Cache local dos overlays da plataforma |
+| `LARA_POLL_INTERVAL_SECONDS` | `120` | Pull de `/cameras` |
+| `LARA_HEARTBEAT_INTERVAL_SECONDS` | `120` | Heartbeat |
+| `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | `10` | Latência para detectar replay pendente (não é o ritmo de retry) |
+| `LOCAL_RAW_RETENTION_DAYS` | `3` | Retenção local dos clipes (só para a página de teste; a entrega oficial é da plataforma) |
+| `MUSIC_DIR` / `MUSIC_VOLUME` / `MUSIC_FADE_SECONDS` | `assets/music` / `0.5` / `1.5` | Música de fundo (ver `assets/music/README.md`) |
 
-> **`DATABASE_URL` não está na tabela acima de propósito:** é lida direto
-> por `db/engine.py`, não por `api/config.py` — mesmo padrão que
-> `capture_camera.sh` já usa (cada módulo se configura sozinho), porque o
-> futuro worker assíncrono de logo (não é a API) também vai precisar da
-> camada de persistência. Default: `sqlite:///.data/repet.db`. **Desde
-> 2026-09-17 (PT-02) a API já grava um `Replay` no banco a cada acionamento
-> bem-sucedido** — best-effort: se a gravação falhar, o replay já gerado em
-> disco continua sendo entregue normalmente (disco é a fonte de verdade
-> final, RNF6; só um aviso vai pro log). No startup, a API também roda
-> `create_db_and_tables()` e sincroniza `Local`/`Esporte`/`Quadra` a partir
-> de `cameras.json` (PT-10, ver seção acima).
-
-> **Nota sobre buffer travado:** se a câmera travar/desconectar mas o
-> processo de captura continuar rodando (não crasha, só para de receber
-> quadro novo), o buffer fica "parado" com segmentos cada vez mais velhos.
-> Sem proteção, o corte usaria esses segmentos velhos e devolveria `200`
-> com um clipe que não é o retroativo real (aconteceu de verdade em
-> 2026-09-15, gap de ~10min na câmera). Por isso existe `MAX_STALENESS_SECONDS`:
-> se o segmento mais recente for mais velho que isso, a API falha
-> explicitamente (`500`) em vez de mascarar o problema com um clipe errado.
-
-> **Nota sobre timeout do cliente:** o corte final é `-c copy` (stream copy,
-> sem reencode, ver nota abaixo) — bem mais rápido que o reencode antigo.
-> Mesmo assim, qualquer cliente que chame `POST /replay/{quadra_id}` (o
-> firmware do botão incluso) deve manter um timeout generoso (usamos 15s no
-> ESPHome), pra cobrir variação de rede/RTSP.
->
-> **Por que o trim final usa `-c copy` em vez de reencodar:** até 2026-09-16
-> isso reencodava pra H.264 (`libx264 -preset veryfast`) porque a câmera real
-> entregava **HEVC**, e um trim com `-c copy` preservava esse codec no clipe
-> final, que não tocava de forma confiável fora do ecossistema Apple. **A
-> partir de 2026-09-17, as câmeras foram configuradas pra entregar H.264
-> nativamente** (ajuste feito na própria câmera, não no software), o que
-> removeu o motivo de reencodar — o trim voltou a usar `-c copy`, caindo de
-> ~1200% CPU/~5-8s por acionamento pra CPU quase zero e <1s. **Pré-requisito
-> que precisa continuar valendo:** toda câmera cadastrada em `cameras.json`
-> precisa estar configurada pra H.264 (não HEVC/outro codec) na própria
-> interface de admin dela — isso não é validado pelo software, é uma
-> configuração externa à câmera. Se alguma câmera nova/trocada vier em HEVC
-> de novo, o clipe final sai em HEVC e volta a ter problema de reprodução;
-> nesse caso, reencodar de novo (só pra aquela câmera, ou globalmente) é a
-> correção. Trade-off aceito do `-c copy`: o corte cai no keyframe mais
-> próximo antes do ponto pedido, não exatamente em `CLIP_DURATION_SECONDS` —
-> o clipe pode sair um pouco mais longo que o pedido (nunca mais curto).
-
-> **Nota sobre a duração do clipe:** o documento de contexto original do
-> projeto menciona 40s ("De olho no lance"); o valor passou por 45s e caiu
-> pra **35s** (2026-09-17). Motivo original era CPU do reencode (que escalava
-> com a duração); depois desse mesmo dia o trim passou a usar `-c copy` (ver
-> nota acima), então hoje a duração não tem mais efeito relevante sobre CPU
-> — 35s ficou só como o valor de produto decidido. Como é uma variável de
-> ambiente e não um valor fixo no código, trocar não exige mudança nenhuma
-> no código — só ajustar `CLIP_DURATION_SECONDS` quando o valor final for
-> decidido.
-
-## Estrutura do repositório
+## Estrutura
 
 ```
-api/
-  main.py               -> App FastAPI: POST /replay/{quadra_id}, /clips, /health
-  config.py             -> Configuração via variáveis de ambiente
-capture/
-  capture_camera.sh     -> Captura contínua de UMA câmera (buffer em segmentos)
-clipper/
-  clip_generator.py     -> Corte dos últimos N segundos, com proteção contra
-                            o segmento ainda sendo escrito (race condition).
-                            Também expõe probe_duration_seconds/probe_resolution
-                            (ffprobe), reusados por integrations/orientation.py
-                            e integrations/overlay.py
-db/
-  engine.py             -> Engine SQLite (modo WAL) + sessão (PT-01)
-  models.py             -> Local, Esporte, Quadra (PT-10, com espelho local da
-                            config do Lara) e Replay (PT-01, com estado de
-                            envio ao Lara), índice composto quadra_id+criado_em.
-                            Não existe entidade Logo — isso é do Lara.
-  migrate_cameras.py    -> Sincroniza Local/Esporte/Quadra a partir de
-                            config/cameras.json (PT-10), idempotente, chamado
-                            no startup da API (main.py)
-  reconcile.py          -> Insere no banco os Replay ausentes por comparação
-                            com o disco (PT-03), chamado no startup da API
-  local_retention.py    -> Apaga (arquivo + registro) Replay mais velho que
-                            LOCAL_RAW_RETENTION_DAYS (S3, não é a entrega ao
-                            sócio — essa é do Lara)
-integrations/
-  lara_client.py         -> Cliente HTTP da API do Lara (/ping, /cameras,
-                            heartbeat, upload de vídeo) — mapeia cada status
-                            HTTP num tipo de erro próprio
-  config_sync.py         -> Pull de GET /cameras com cache por config_hash;
-                            baixa overlay novo e atualiza Quadra
-  orientation.py         -> Aplica (nunca decide) a orientação pedida pelo
-                            Lara, via crop centralizado (ffmpeg). Expõe
-                            compute_crop()/orientation_applies() (decisão
-                            pura, sem ffmpeg), reusadas por render.py
-  overlay.py             -> Aplica (nunca decide) o overlay em cache no clipe,
-                            via ffmpeg, escalando pro tamanho real do vídeo.
-                            Expõe pick_overlay_path() (decisão pura),
-                            reusada por render.py
-  render.py              -> Orquestra orientation.py + overlay.py — funde os
-                            dois num único passe de ffmpeg (um decode, um
-                            encode) quando os dois se aplicam à mesma quadra,
-                            em vez de dois passes sequenciais (achado numa
-                            auditoria de CPU, 2026-09-22: é o caso comum em
-                            produção)
-  audio.py               -> Mixa música de fundo (decisão LOCAL, não vem do
-                            Lara) — sorteia uma faixa de assets/music/, corta
-                            pra duração do clipe com fade in/out
-  upload_queue.py        -> Processa Replay pendente: chama render.py e
-                            depois audio.py, envia ao Lara, idempotente por
-                            external_id do clipe
-  heartbeat.py           -> Heartbeat periódico por câmera; falha só loga
-assets/
-  music/                 -> Faixas de música de fundo — 2 faixas reais já
-                            versionadas (exceção deliberada, ver
-                            assets/music/README.md); novos arquivos locais
-                            continuam gitignored por padrão
-config/
-  cameras.json          -> Registro central de câmeras (fonte única de verdade;
-                            gitignored — tem credencial real, nunca commitado)
-  cameras.example.json  -> Template commitado, copiar pra cameras.json
-systemd/
-  replay-capture@.service          -> Unit template (1 instância por câmera)
-  replay-api.service               -> Unit da API
-  replay-buffer-cleanup.service    -> Unit da limpeza do buffer
-  replay-local-retention.service   -> Unit da retenção local dos clipes finais
-  replay-lara-worker.service       -> Unit do worker do Lara
-  env-examples/                     -> replay-system.env.example (compartilhado
-                                        pelos units acima, exceto captura) e um
-                                        .env por câmera
-scripts/
-  generate_camera_envs.py   -> Gera os .env de systemd a partir de cameras.json
-  cleanup_segments.sh       -> Um passe de limpeza do buffer (retenção: últimos 2min)
-  cleanup_loop.sh           -> Roda cleanup_segments.sh em loop (usado pelo start.sh
-                                enquanto o cron real de produção não existe)
-  local_retention_loop.py   -> Roda db/local_retention.py em loop (a cada 1h)
-  ensure_services.sh        -> Sobe/confere API, captura, limpezas e worker do
-                                Lara — chamado por start.sh e por watchdog_loop.sh
-  watchdog_loop.sh           -> Chama ensure_services.sh a cada 30s, sem rodar
-                                testes de novo — supervisão contínua sem systemd
-  lara_worker.py            -> Processo com as 3 rotinas de fundo da integração
-                                com o Lara: sync de config, fila de envio, heartbeat
-  lara_diagnostic.py        -> Chama /ping e /cameras (ao vivo) e mostra, por
-                                câmera, se o cache local está sincronizado
-test/
-  test_db.py               -> pytest: camada de persistência (db/) — criação de
-                                tabela, índice e round-trip de insert/consulta
-  test_reconcile.py        -> pytest: reconciliação disco->banco (PT-03)
-  test_local_retention.py  -> pytest: retenção local dos clipes finais (S3)
-  test_lara_integration.py -> pytest: cliente do Lara (mapeamento de erro),
-                                cache por config_hash, fila de envio (com
-                                backoff, inclusive de falha local de
-                                ffmpeg), orientação (crop), overlay, música
-  run_pipeline_test.sh     -> Testa capture + clipper direto (sem API, sem câmera real)
-  run_api_test.sh          -> Testa a API real (uvicorn) + POST via curl, ponta a ponta
-start.sh                  -> Sobe venv/deps, carrega .env, roda os testes padrão e
-                              chama ensure_services.sh + watchdog_loop.sh
+api/            FastAPI: POST /replay, endpoints /api/*, /quadra, /clips, /health
+capture/        capture_camera.sh — captura contínua de UMA câmera
+clipper/        clip_generator.py — corte dos últimos N s (+ ffprobe helpers)
+db/             SQLite (WAL): modelos Local/Esporte/Quadra/Replay, migração de
+                cameras.json, reconciliação disco→banco, retenção local
+integrations/   Integração: client, config_sync, upload_queue, heartbeat,
+                render/orientation/overlay, audio
+scripts/        worker de integração, loops de limpeza/retenção, watchdog,
+                ensure_services, geração de .env por câmera, diagnóstico
+systemd/        units (api, capture@, cleanup, local-retention, lara-worker)
+                + env-examples
+assets/music/   trilhas de fundo
+config/         cameras.example.json (template; cameras.json é gitignored)
+test/           pytest (db, reconcile, retenção, integração externa) e
+                testes de shell (pipeline e API ponta a ponta)
 ```
 
-## Integração com o Lara (PT-14/PT-15)
+## Rodando
 
-O Lara é o sistema de gestão do clube e passa a ser a fonte de verdade da
-configuração operacional (orientação de vídeo, duração do clipe e
-logomarca) e o repositório de entrega do clipe ao sócio. Este repositório
-nunca decide nenhuma dessas três coisas — só consulta, aplica
-mecanicamente e envia. Detalhes de arquitetura e requisitos em
-`PLANO_DE_ACAO.md` (seção 6) e `PLANEJAMENTO.md`.
-
-**Aplicação mecânica no worker de fila (`integrations/upload_queue.py`),
-nessa ordem, antes do envio:**
-1. **Orientação + overlay** (`integrations/render.py`, orquestra
-   `orientation.py`+`overlay.py`) — corta centralizado pro aspect ratio
-   pedido (`orientation: "vertical"` = 9:16, `"horizontal"` = 16:9) e
-   queima a logo em cima do resultado, escalando pro tamanho já cortado.
-   **Quando os dois se aplicam à mesma quadra — o caso comum em
-   produção — é UM SÓ passe de ffmpeg** (`crop`+`scale`+`overlay` num
-   único `filter_complex`, um decode e um encode), não dois passes
-   sequenciais (achado numa auditoria de CPU, 2026-09-22: câmeras reais
-   entregam 4:3 e a maioria das quadras tem overlay configurado, então o
-   caso "os dois se aplicam" não é exceção, é a regra). Sem reencode
-   algum se nenhum dos dois se aplica (câmera já entrega nativamente o
-   aspect ratio pedido, dentro de 1% de tolerância, e/ou quadra sem
-   overlay em cache).
-2. **Música de fundo** (`integrations/audio.py`) — decisão LOCAL, não vem
-   do Lara (o contrato dele não tem campo de áudio): sorteia uma faixa
-   de `MUSIC_DIR` (assets/music/, ver `assets/music/README.md`) e usa
-   sempre o TRECHO INICIAL dela (0s até a duração do clipe — ex.: clipe
-   de 30s usa os primeiros 30s da faixa), com loop só como fallback se a
-   faixa for mais curta que o clipe, mais fade in/out e volume fixo. Sem
-   nenhuma faixa disponível, no-op (sem reencode). Como as câmeras não
-   entregam áudio, o clipe só ganha a trilha da música — não há áudio
-   original pra mixar.
-
-O arquivo final (se algum dos três passos mudou algo) fica em
-`Replay.arquivo_processado` — é o que `/api/replays/{id}/media` prefere
-servir, e o que é enviado ao Lara.
-
-Variáveis de ambiente novas (sem default de propósito para as duas
-primeiras — são endereço/credencial de outro sistema):
-
-| Variável | Obrigatória | Descrição |
-|---|---|---|
-| `LARA_BASE_URL` | sim, pra ligar a integração | Base da API do Lara, ex. `https://lara.clube.example/api/replay` |
-| `REPLAY_API_TOKEN` | sim, pra ligar a integração | Token pessoal Sanctum, gerado por `php artisan replay:token` do lado do Lara |
-| `OVERLAY_CACHE_DIR` | não (default `/var/replay/overlays`) | Onde os overlays baixados ficam em cache local |
-| `LARA_POLL_INTERVAL_SECONDS` | não (default `120`) | Intervalo entre pulls de `GET /cameras` e heartbeats |
-| `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | não (default `10`) | Intervalo entre passadas da fila de envio de clipes — só afeta a LATÊNCIA de detectar um replay novo pendente, não o ritmo de retentativa de um que já falhou (ver backoff abaixo) |
-| `LOCAL_RAW_RETENTION_DAYS` | não (default `3`, a confirmar) | Retenção do arquivo local, usado só pela página de teste `/quadra/{id}` — não é a entrega ao sócio (essa é do Lara, 7 dias) |
-| `MUSIC_DIR` | não (default `assets/music/`) | Pasta com as faixas de música de fundo — ver `assets/music/README.md`. Vazia/ausente = sem música |
-| `MUSIC_VOLUME` | não (default `0.5`) | Volume fixo aplicado à faixa (filtro `volume` do ffmpeg) |
-| `MUSIC_FADE_SECONDS` | não (default `1.5`) | Duração do fade in/out da música no início/fim do clipe |
-
-**Configuração persistente (recomendado):** `cp .env.example .env`,
-preencher `LARA_BASE_URL`/`REPLAY_API_TOKEN`/`ADMIN_USERNAME`/
-`ADMIN_PASSWORD` (e qualquer um dos ajustes finos opcionais) e rodar
-`./start.sh` de novo — ele carrega `.env` automaticamente se existir,
-sem sobrescrever nada que já esteja exportado no ambiente (útil se um
-deploy real preferir setar via systemd `EnvironmentFile=` em vez deste
-arquivo). `.env` é gitignored — nunca commitar credencial real aqui,
-mesmo padrão já usado em `config/cameras.json`. Alternativa sem arquivo:
-`export REPLAY_API_TOKEN=...` na sessão de shell antes de `./start.sh`
-(não sobrevive a reboot/novo terminal).
-
-Sem `LARA_BASE_URL`/`REPLAY_API_TOKEN` definidos (nem no `.env` nem no
-ambiente), `./start.sh` não sobe o worker do Lara e avisa — o resto do
-sistema (captura, corte, página pública) continua funcionando
-normalmente. Sem `ADMIN_USERNAME`/`ADMIN_PASSWORD`, `DELETE
-/api/replays/{id}` recusa toda requisição com `401` (deny-by-default, ver
-seção "Endpoint da API"). Diagnóstico manual (chama `/ping` e `/cameras`
-ao vivo e compara com o cache local):
-
-```bash
-python -m scripts.lara_diagnostic
-```
-
-**Backoff da fila de envio (RNF4):** uma falha transitória (401/403/404/
-429/5xx/rede) não retenta a cada passada da fila — cada replay pendente
-tem seu próprio atraso exponencial (`lara_tentativas`/
-`lara_proxima_tentativa_em` em `Replay`, `integrations/upload_queue.py`):
-10s, 20s, 40s... até um teto de 10min, zerado em sucesso ou falha
-definitiva (422/413). Sem isso, uma indisponibilidade prolongada do Lara
-bateria nele a cada `LARA_UPLOAD_POLL_INTERVAL_SECONDS` pra cada replay
-pendente.
-
-**Auditoria campo a campo contra o texto literal do prompt do Lara
-(2026-09-24):** comparado ponto a ponto contra todo este módulo de
-integração (cadência do pull/heartbeat, gate por `config_hash`, aplicação
-do overlay em `(0,0)` sem posicionar, preferência `animated_url` >
-`png_url`, rescale pro tamanho real do clipe, `sources` ignorado,
-multipart do envio, idempotência por `external_id` do clipe, `recorded_at`
-= instante do botão, `url` do Lara nunca persistida, backoff em falha
-transitória, 422/413 sem retry, diagnóstico ao vivo) — **nenhuma
-divergência de código encontrada.** A única lacuna que segue em aberto é
-`docs/replay-api.md` (o contrato completo do Lara, citado no próprio
-prompt): nunca foi pedido/lido; a implementação inteira foi feita em cima
-do resumo/prompt, não do contrato completo (ver `PLANO_DE_ACAO.md` seção
-6/8).
-
-**`recorded_at` sempre com offset explícito (corrigido em 2026-09-22).**
-`Replay.criado_em` vem de `datetime.now()` naive; o relógio do servidor é
-UTC (`Etc/UTC`), então o valor já É um instante UTC, só sem a marcação.
-`integrations/lara_client.py::upload_video` agora faz
-`recorded_at.replace(tzinfo=timezone.utc)` antes do `isoformat()`
-(produz `...+00:00`, inequívoco) — antes mandava a string sem offset, e
-um backend Laravel/Carbon tende a interpretar isso no timezone
-configurado da aplicação (aparentemente America/Sao_Paulo, UTC-3),
-deslocando o horário do clipe em ~3h no lado do Lara. **Mecanicamente
-corrigido e no ar, mas ainda sem confirmação ponta a ponta** — o último
-envio bem-sucedido registrado foi ~2min ANTES do fix entrar em vigor, e
-desde então o Lara está indisponível na rota `/api/replay/*` (ver risco
-"Indisponibilidade do Lara" no `PLANO_DE_ACAO.md` seção 11), então
-nenhum envio pós-fix teve sucesso ainda pra confirmar o horário salvo do
-lado de lá. Confirmar assim que a fila represada for enviada.
-
-## Como rodar (jeito rápido)
+### Dev / sem systemd
 
 ```bash
 ./start.sh
 ```
 
-Faz tudo de uma vez: cria/atualiza o venv (`.venv/`), confere `ffmpeg`,
-roda os testes padrão abaixo — `pytest test/` (camada de persistência) e os
-dois testes de shell (com log em `logs/test_*.log` e feedback
-`[OK]`/`[FALHOU]` no terminal) — e, por fim, garante que os serviços
-abaixo estejam no ar (via `scripts/ensure_services.sh`, chamado por ele),
-sem subir duplicata do que já estiver rodando (checa PID em `run/*.pid`).
-No final imprime as URLs úteis (`/health`, `/quadra/<id>` de cada câmera).
+Cria o venv, confere `ffmpeg`, roda os testes e garante no ar (sem duplicar,
+via PID em `run/*.pid`): API (porta 8000), captura (1 por câmera), limpeza
+do buffer (últimos 2 min), retenção local (a cada 1h) e worker de integração (se
+configurado). Também sobe o **watchdog** (`scripts/watchdog_loop.sh`), que
+chama `ensure_services.sh` a cada 30s e reinicia o que cair.
 
-| Serviço | Script | O que faz |
-|---|---|---|
-| API | `uvicorn api.main:app` | porta 8000 |
-| Captura | `capture/capture_camera.sh` (1 por câmera) | buffer contínuo em `BUFFER_ROOT` |
-| Limpeza do buffer | `scripts/cleanup_loop.sh` | mantém só os **últimos 2 minutos** de buffer bruto (`cleanup_segments.sh` a cada 30s) |
-| Retenção local | `scripts/local_retention_loop.py` | apaga clipe+registro mais velhos que `LOCAL_RAW_RETENTION_DAYS` (checa a cada 1h) — sempre sobe, não depende do Lara |
-| Worker do Lara | `scripts/lara_worker.py` | só sobe se `LARA_BASE_URL`/`REPLAY_API_TOKEN` estiverem configurados (`.env` ou ambiente) |
+Limitações: o watchdog não tem supervisor próprio. **Nunca rode dois
+`start.sh`/watchdogs como usuários diferentes** na mesma máquina — um não
+enxerga o PID do outro e acumulam `ffmpeg` duplicado (já causou clipes com
+"vídeo voltando"). `ensure_services.sh` recusa subir duplicata se achar o
+mesmo comando rodando (`pgrep -f`); se avisar, mate o órfão antes. O
+watchdog também não recarrega o `.env` sozinho — reinicie o worker após
+editar.
 
-Nenhum desses depende de cron/systemd do sistema pra funcionar (loop
-próprio em cada um).
+### Produção (systemd)
 
-Pra parar um serviço: `kill $(cat run/api.pid)` (ou o
-`run/capture_<quadra_id>.pid` / `run/cleanup.pid` / `run/local_retention.pid`
-/ `run/lara_worker.pid` / `run/watchdog.pid` correspondente) — mas o
-watchdog abaixo sobe ele de novo na próxima checagem, a não ser que você
-pare o watchdog também.
-
-### Watchdog (supervisão contínua)
-
-`./start.sh` também sobe `scripts/watchdog_loop.sh` (PID em
-`run/watchdog.pid`, log em `logs/watchdog.log`): a cada 30s ele chama de
-novo `ensure_services.sh` (sem rodar a suíte de testes de novo) — se
-qualquer um dos serviços da tabela acima tiver caído (crash, `kill`
-manual, etc.), ele sobe sozinho na próxima passada, sem precisar rodar
-`./start.sh` de novo. Só loga quando de fato reinicia algo ou algo falha
-ao subir — rodando saudável, fica em silêncio.
-
-**Limitação conhecida:** o próprio watchdog não tem supervisor — se ele
-morrer, nada o reinicia sozinho (é bash puro, subido pelo `start.sh`, sem
-depender de systemd/root). Pra supervisão sem esse ponto único de falha,
-use os units systemd (`systemd/replay-*.service`, `Restart=always` no
-nível do sistema operacional) quando for pra produção de verdade — ver
-"Rodando a API em produção" abaixo. As duas abordagens fazem a mesma
-coisa (manter os processos no ar); o watchdog é a opção que funciona hoje
-sem sudo, os units são a opção mais robusta pra quando isso for
-instalado como serviço de sistema.
-
-**Nunca rode dois supervisores (dois `start.sh`/watchdog) como usuários
-diferentes na mesma máquina.** `kill -0` (a checagem de "já tá rodando" via
-`run/*.pid`) falha entre usuários diferentes — sem permissão pra sinalizar
-processo alheio — então dois watchdogs de usuários diferentes nunca se
-reconhecem um ao outro e cada um fica subindo duplicata da captura/API sem
-nunca matar a anterior. Aconteceu de verdade (2026-09-22): um watchdog
-órfão como `root`, esquecido de uma sessão anterior, ficou horas rodando
-em paralelo com o watchdog normal — resultado foram dezenas de `ffmpeg`
-simultâneos na mesma câmera, cada um com seu próprio relógio interno,
-produzindo clipe final com conteúdo fora de ordem ("vídeo voltando").
-Defesa adicionada em `ensure_services.sh`/`start.sh`: antes de subir
-qualquer processo, além do `kill -0` no PID salvo, um `pgrep -f` (que
-enxerga processo de qualquer usuário, já que só lê `/proc`) procura por
-outro processo já rodando o mesmo comando; se achar, recusa subir
-duplicata e avisa alto no log em vez de empilhar mais um. Isso reduz o
-dano, mas não substitui garantir que só uma sessão/usuário rode o `start.sh`
-por vez — se aparecer um aviso desses, mate o processo órfão manualmente
-(`ps -o pid,user,cmd -p <PID>`, `sudo kill <PID>` se for de outro usuário)
-antes de rodar de novo.
-
-## Como testar localmente (sem câmera real, sem hardware)
-
-**Teste 0 — camada de persistência (`db/`) e migração de câmeras, sem
-câmera/API nenhuma:**
-```bash
-python -m pytest test/test_db.py -v
-```
-Roda com `python -m pytest` (não `pytest` puro) — precisa do diretório raiz
-do repo no `sys.path` pra importar `db.models`, e `python -m` garante isso.
-Cobre: criação de tabela/índice, integridade referencial (Replay exige
-Quadra existente), e a sincronização idempotente de `db/migrate_cameras.py`.
-
-Nenhum dos dois testes abaixo precisa de câmera de verdade — ambos usam uma
-fonte sintética (`ffmpeg testsrc`) no lugar do RTSP. Já rodei os dois aqui;
-ambos passaram (clipe final de `CLIP_DURATION_SECONDS`s, H264, servido
-corretamente).
-
-**Teste 1 — só a lógica de captura + corte (sem subir a API):**
-```bash
-bash test/run_pipeline_test.sh
-```
-
-**Teste 2 — endpoint HTTP real (uvicorn + curl), incluindo caso de erro:**
-```bash
-bash test/run_api_test.sh
-```
-Esse cobre: quadra desconhecida (404), trigger válido (200 + clipe
-gerado), download do clipe pela URL pública retornada, validação do
-arquivo com `ffprobe`, e (desde PT-10/PT-02) que o replay foi registrado
-no banco e que a quadra foi migrada de `cameras.json` corretamente — em
-banco isolado (`$WORKDIR/repet_test.db`), não no `.data/repet.db` de dev.
-
-## Rodando a API em produção
-
-Rápido, sem systemd (mesma ideia do `./start.sh`, manual):
-```bash
-pip install -r requirements.txt   # fastapi, uvicorn
-export BUFFER_ROOT=/var/replay
-export OUTPUT_DIR=/var/replay/output
-export CAMERAS_FILE=/opt/replay-system/config/cameras.json
-uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
-
-**Com systemd (recomendado pra produção de verdade — `Restart=always` no
-próprio sistema operacional, sobrevive a reboot, sem depender do
-watchdog em bash descrito acima):** `systemd/` tem um unit por serviço,
-todos compartilhando um único `EnvironmentFile` (mesmas chaves do `.env`
-de dev, valores em `/var/replay` de verdade em vez de `.data/`):
-
-| Unit | Serviço |
-|---|---|
-| `replay-api.service` | API |
-| `replay-capture@.service` | captura — 1 instância por câmera, `systemctl enable --now replay-capture@loc1-quadra1` etc., env próprio em `/etc/replay-system/cameras/<quadra_id>.env` |
-| `replay-buffer-cleanup.service` | limpeza do buffer |
-| `replay-local-retention.service` | retenção local dos clipes finais |
-| `replay-lara-worker.service` | worker do Lara — só habilite depois de preencher `LARA_BASE_URL`/`REPLAY_API_TOKEN` no env compartilhado |
+Um unit por serviço, todos com `Restart=always` e um `EnvironmentFile`
+compartilhado:
 
 ```bash
 sudo mkdir -p /opt/replay-system /etc/replay-system/cameras
-sudo cp -r . /opt/replay-system   # ou git clone direto lá
+sudo cp -r . /opt/replay-system
 cd /opt/replay-system && sudo python3 -m venv .venv && sudo .venv/bin/pip install -r requirements.txt
 sudo cp systemd/env-examples/replay-system.env.example /etc/replay-system/replay-system.env
-sudo "$EDITOR" /etc/replay-system/replay-system.env   # preencher de verdade
 sudo cp systemd/env-examples/loc1-quadra3.env /etc/replay-system/cameras/loc1-quadra1.env  # 1 por câmera
-sudo "$EDITOR" /etc/replay-system/cameras/loc1-quadra1.env
-sudo useradd -r -s /usr/sbin/nologin replay   # se ainda não existir
+sudo useradd -r -s /usr/sbin/nologin replay
 sudo chown -R replay:replay /opt/replay-system /var/replay
-sudo cp systemd/*.service /etc/systemd/system/
-sudo systemctl daemon-reload
+sudo cp systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now replay-api replay-buffer-cleanup replay-local-retention
 sudo systemctl enable --now replay-capture@loc1-quadra1
-# sudo systemctl enable --now replay-lara-worker   # só depois de configurar o Lara
+sudo systemctl enable --now replay-lara-worker   # só após configurar a integração
 ```
-Não testado neste repositório (exigiria root numa máquina real) — os
-units seguem o mesmo padrão do `replay-capture@.service` já existente
-desde antes, que também nunca foi instalado aqui. Confira `WorkingDirectory`/
-caminhos de `.venv` se o deploy real não usar `/opt/replay-system`.
 
-## Funcionalidades futuras (não implementadas)
+Os units **não foram instalados/testados neste repositório** (exigem root
+numa máquina real); confira `WorkingDirectory` e o caminho do `.venv` se o
+deploy não usar `/opt/replay-system`.
 
-**Logo/marca d'água queimada no clipe: IMPLEMENTADA desde a pivotagem pro
-Lara (17/09/2026), não é mais "futura" — ver `integrations/overlay.py` e
-a seção "Integração com o Lara" acima.** O bloco abaixo (discutido em
-2026-09-17, antes da pivotagem) previa um cadastro de logo local que
-nunca chegou a ser codado; ficou substituído pelo Lara, que decide a
-logo e já entrega ela composta. Os fatos técnicos sobre custo de CPU
-abaixo continuam valendo pra implementação real de hoje — mantidos como
-referência:
-- Overlay reverte a otimização `-c copy` pro clipe que leva logo —
-  overlay exige decodificar+recodificar o vídeo inteiro (limitação de
-  qualquer codec preditivo tipo H.264, não é limitação do ffmpeg
-  especificamente). Implementado com preset `ultrafast` do libx264
-  (decidido aqui em 2026-09-17, confirmado na implementação real).
-  Avaliado e descartado na época: forçar `profile=baseline` (o
-  `ultrafast` já desliga B-frames/CABAC/multi-ref por conta própria,
-  ganho adicional seria marginal); trocar de codec por VP9/AV1 (mais
-  pesados de codificar que H.264, na direção errada); MJPEG intra-only
-  (mais rápido de codificar, mas arquivo final bem maior — ruim pra
-  servir publicamente).
-- Alavanca real pra baixar o custo, ainda não aplicada: **aceleração de
-  hardware de vídeo** (Intel Quick Sync via VAAPI, ou NVENC/NVDEC da
-  Nvidia) — decode+overlay+encode rodando num bloco de silício dedicado
-  em vez da CPU de uso geral. Estimativa: cai de ~1000-1200% CPU pra CPU
-  de um dígito só. Depende do hardware do servidor central (ver seção
-  abaixo, "parado indefinidamente" segundo o responsável) — não é
-  pré-requisito pra funcionar, só pra reduzir custo de fila em pico.
-- **Alternativa nativa da câmera (HiLook/Hikvision, Picture Overlay):**
-  levantada e avaliada antes da pivotagem pro Lara (BMP 24-bit, máximo
-  128×128px, sem confirmação de suporte a transparência nem de
-  automação via API/ISAPI) — deixou de ser relevante, o Lara já resolve
-  a composição da logo do lado dele. Mantido só como registro histórico,
-  não é mais caminho ativo.
+### Testes
 
-**Música/trilha de áudio.** Implementado (`integrations/audio.py`, ver
-seção "Integração com o Lara" acima) — não exige tocar no stream de vídeo
-(`-c:v copy` continua valendo), só o áudio é (re)codificado, custo de CPU
-desprezível. Duas faixas reais em `assets/music/` desde 2026-09-22
-(`clubix dingle.mp3`, `rePET dingle.mp3`), sorteadas por clipe.
+```bash
+python -m pytest test/ -v         # db, reconcile, retenção local, integração externa
+bash test/run_pipeline_test.sh    # captura + corte, fonte sintética (ffmpeg testsrc)
+bash test/run_api_test.sh         # uvicorn + curl ponta a ponta, banco isolado
+```
 
-### Servidor central (hardware — ainda em aberto)
+Nenhum precisa de câmera ou hardware.
 
-Ainda não decidido entre **Mini PC/NUC** e **Raspberry Pi 5 8GB** como
-compute único do backend central (ver decisão de arquitetura "backend
-central único" acima).
+## Hub de botões (ESPHome)
 
-A balança pesa mais pra NUC (com Intel Quick Sync, se o modelo tiver)
-desde 2026-09-17: a feature de logo queimado (acima) precisa de
-aceleração de hardware de vídeo pra não pesar demais na CPU, e — pelo que
-se sabe, **ainda não confirmado na especificação oficial** — o Raspberry
-Pi 5 removeu o encoder de vídeo em hardware que modelos anteriores tinham
-(mantém só decode acelerado). Se confirmado, o RPi5 não teria como
-acelerar esse reencode de jeito nenhum, nem encaixando uma GPU dedicada
-(sem slot PCIe de verdade). Não testável na VM de desenvolvimento atual
-(Hyper-V sem GPU passada) — só validável com o hardware real escolhido.
+Cadeia validada com hardware real em 2026-09-15 (devkit ESP8266 de
+bring-up). O hardware definitivo é um **ESP32 DevKit V1 (WROOM-32) +
+módulo Ethernet W5500 por SPI**, 1 por local, até 8 botões — ainda
+pendente de compra/novo bring-up. Evitar ENC28J60 (instável).
 
-## Próximos passos
+**W5500 (7 fios, MISO/MOSI não se cruzam):**
 
-1. ✅ Buffer contínuo + corte de clipe (validado sem hardware, depois com
-   câmera RTSP real).
-2. ✅ Endpoint `POST /replay/{quadra_id}` acionando o corte (validado com
-   requisição HTTP real e, em 2026-09-15, com botão físico real).
-3. ✅ `GET /quadra/{quadra_id}` pública (lista os replays recentes, direto
-   do disco). Falta estilizar/melhorar visualmente.
-4. 🔶 Botão físico: ESPHome chamando este endpoint direto (sem HA)
-   validado com devkit **ESP8266** de bring-up. Falta comprar/testar o
-   devkit **ESP32 + módulo Ethernet W5500** definitivo e replicar pros
-   demais botões/locais.
-5. ✅ Persistência em SQLite (`db/`, ver `PLANEJAMENTO.md`/`PLANO_DE_ACAO.md`
-   — decisão revisada de Postgres pra SQLite em 2026-09-17): modelos
-   `Local`/`Esporte`/`Quadra` migrados de `cameras.json` (PT-10), `Replay`
-   registrado a cada acionamento (PT-02) e reconciliado com o disco a cada
-   start da API (PT-03). Integração com o Lara (PT-14/PT-15: pull de
-   configuração, aplicação de orientação e overlay, envio do clipe,
-   heartbeat, diagnóstico) substituiu o pacote de cadastro/hierarquia de
-   logo local —
-   não existe mais entidade `Logo` neste projeto, ver seção "Integração
-   com o Lara" abaixo. `GET /api/replays/{replay_id}`, `.../media` e
-   `GET /api/quadras/{quadra_id}/replays` (M5/M6/M7, PT-04/PT-05/PT-06)
-   expõem o replay por id e por quadra (paginado). `DELETE
-   /api/replays/{replay_id}` (M8, PT-07) remove registro e arquivo.
-6. ✅ Autenticação HTTP Basic (M11, PT-08) protegendo o único endpoint de
-   gerenciamento existente hoje (o `DELETE` acima) —
-   `ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default. Só endpoints JSON, sem
-   página web (ver nota de escopo no topo do README). Frontend/painel que
-   consumir essa API é de outro projeto.
-7. ✅ Limpeza do buffer (retenção fixa de 2min, `scripts/cleanup_loop.sh`)
-   e retenção local dos clipes finais (`LOCAL_RAW_RETENTION_DAYS`,
-   `scripts/local_retention_loop.py`, S3) — as duas sobem automaticamente
-   pelo `start.sh`, sem depender de cron do sistema.
-8. ✅ Supervisão dos serviços: watchdog em bash (`scripts/watchdog_loop.sh`,
-   sobe junto com `./start.sh`, reinicia o que cair a cada 30s, sem
-   depender de systemd/root) **e** units systemd de verdade
-   (`systemd/replay-*.service`, `Restart=always` no sistema operacional —
-   ver "Rodando a API em produção") pra quando isso for instalado como
-   serviço de sistema. Os units não foram instalados/testados neste
-   repositório (exigiria root numa máquina real).
+| DevKit | GPIO | W5500 |
+|---|---|---|
+| D19 | 19 | MISO |
+| D18 | 18 | MOSI |
+| D5 | 5 | SCS |
+| TX2 | 17 | SCLK |
+| RX2 | 16 | RST |
+| GND / 3V3 | — | GND / 3V3 (INT desconectado) |
+
+**Botões** (`INPUT_PULLUP`, cada um entre o GPIO e GND, sem resistor
+externo): quadra 1→GPIO32, 2→33, 3→25, 4→26, 5→27, 6→14, 7→12, 8→13.
+Reservas: `D4, D21, D22, D23`.
+
+Pontos de atenção:
+- **GPIO12 (quadra 7) é pino de strapping** — nunca colocar pull-up externo
+  (nível alto no reset seleciona flash 1,8V e a placa não inicia). O aviso
+  de strapping do ESPHome na compilação é esperado.
+- **Capacitores de desacoplamento** (100nF + 10µF) o mais perto possível do
+  módulo de rede; o W5500 puxa ~150mA em rajadas e sem isso o link cai só em
+  produção.
+- **Tensão do módulo:** módulos pequenos (W5500 Lite) são 3,3V apenas e
+  queimam com 5V. Terra comum obrigatório.
+- **WROOM vs WROVER:** GPIO16/17 são consumidos pela PSRAM no WROVER —
+  conferir a serigrafia.
+- Se instável, reduzir `clock_speed` do SPI (mínimo 8MHz) e manter fios
+  curtos (~5cm).
+- Conferir MISO×MOSI e TX2×RX2 (trocar inverte SCLK/RST); uma linha
+  deslocada nos botões reporta a quadra errada silenciosamente.
+
+Validação antes da solda: (1) protoboard com módulo + **um** botão, Ethernet
+subindo com IP fixo; (2) energizar com o botão da quadra 7 pressionado — deve
+iniciar; (3) só então replicar pros 8 e passar à perfboard.
+
+## Estado atual
+
+| Área | Estado |
+|---|---|
+| Captura contínua, corte, API de replay | ✅ validado com câmera RTSP real |
+| Persistência SQLite, reconciliação disco→banco, retenção local | ✅ |
+| Integração externa (sync, orientação, overlay, música, fila com backoff, heartbeat, diagnóstico) | ✅ 1º envio confirmado em 2026-10-05; auditada campo a campo contra a especificação |
+| `recorded_at` em horário local com offset | ✅ corrigido; confirmar na plataforma após fila represada |
+| Supervisão (watchdog em bash + units systemd) | ✅ watchdog em uso; units não instalados |
+| Botão físico definitivo (ESP32 + W5500) | 🔶 lógica validada com ESP8266; falta o hardware definitivo e replicar por local |
+| Contrato completo da API externa (`docs/replay-api.md`) | ⚠️ nunca lido; implementação baseada na especificação resumida |
+| Aceleração de vídeo por hardware (Quick Sync/NVENC) | ⏳ não aplicada; hoje orientação/overlay reencodam em CPU (`libx264 veryfast`, CRF 23) |
+| Servidor de produção (Mini PC/NUC vs. Raspberry Pi 5) | ⏳ em aberto; NUC favorecido pelo encode por hardware |

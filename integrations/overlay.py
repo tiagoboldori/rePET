@@ -1,10 +1,7 @@
-"""
-overlay.py — aplicação mecânica do overlay do Lara no clipe (PT-15,
-PLANO_DE_ACAO.md v3 seção 6, item 3). Este módulo nunca decide nada: o
-Lara já resolveu qual overlay vale para a quadra e o compôs pronto,
-tamanho cheio do frame, para aplicar em (0,0). A única decisão daqui é
-mecânica — reescalar para a resolução real do clipe quando ela difere de
-overlay.width/overlay.height (mesma proporção, sem distorção).
+"""Aplica o overlay da plataforma externa no clipe.
+
+O overlay já vem do tamanho do frame e é aplicado em (0,0), reescalado para a
+resolução do clipe quando difere.
 """
 from __future__ import annotations
 
@@ -28,11 +25,7 @@ def _run(cmd: list[str]) -> None:
 
 
 def pick_overlay_path(quadra: Quadra) -> Path | None:
-    """Decisão pura (sem ffmpeg): devolve o arquivo de overlay a aplicar
-    (preferindo o animado, conforme o contrato do Lara), ou `None` se a
-    quadra não tem overlay em cache local. Extraído de `apply_overlay` pra
-    ser reutilizável por `integrations/render.py` (fusão orientação+overlay
-    num só passe de ffmpeg quando os dois se aplicam, ver docstring de lá)."""
+    """Devolve o overlay em cache (animado tem preferência) ou `None`."""
     animated = Path(quadra.overlay_animated_path) if quadra.overlay_animated_path else None
     png = Path(quadra.overlay_png_path) if quadra.overlay_png_path else None
 
@@ -44,11 +37,7 @@ def pick_overlay_path(quadra: Quadra) -> Path | None:
 
 
 def apply_overlay(clip_path: Path, quadra: Quadra) -> Path:
-    """Se a quadra não tiver overlay em cache local, devolve `clip_path`
-    sem tocar nele (sem reencode — caso comum). Senão, queima o overlay
-    (preferindo o animado quando presente, conforme o contrato do Lara) e
-    devolve o novo arquivo (`<clip>_overlay.mp4`). É o único ponto em que
-    o corte volta a pagar reencode depois da otimização `-c copy`."""
+    """Devolve `clip_path` intacto sem overlay; senão gera `<clip>_overlay.mp4`."""
     overlay_path = pick_overlay_path(quadra)
     if overlay_path is None:
         return clip_path

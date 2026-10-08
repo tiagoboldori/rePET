@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-local_retention_loop.py — roda db/local_retention.py::purge_expired_replays
-em loop, uma vez por hora (retenção é medida em dias, não precisa de
-cadência mais fina que isso). Subido pelo scripts/ensure_services.sh
-(chamado por start.sh e pelo watchdog), sempre — ao contrário do worker
-do Lara, não depende de nenhuma credencial externa pra funcionar.
+"""Roda purge_expired_replays (db/local_retention.py) em loop, uma vez por hora.
 
 Uso:
     python -m scripts.local_retention_loop
@@ -23,7 +18,7 @@ CHECK_INTERVAL_SECONDS = 3600
 
 
 def main() -> None:
-    create_db_and_tables()  # idempotente — cobre rodar isolado, sem a API já ter subido
+    create_db_and_tables()  # idempotente; permite rodar sem a API
     print(
         f"[local-retention] no ar — retenção={config.LOCAL_RAW_RETENTION_DAYS} dia(s), "
         f"checagem a cada {CHECK_INTERVAL_SECONDS}s"
@@ -36,7 +31,7 @@ def main() -> None:
                 )
                 if removidos:
                     print(f"[local-retention] {removidos} replay(s) expirado(s) removido(s).")
-        except Exception as exc:  # noqa: BLE001 — loop de fundo não pode morrer por uma falha isolada
+        except Exception as exc:  # noqa: BLE001 — não deixa o loop morrer
             print(f"[local-retention] erro inesperado: {exc}")
         time.sleep(CHECK_INTERVAL_SECONDS)
 

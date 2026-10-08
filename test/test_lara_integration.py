@@ -1,11 +1,6 @@
-"""
-test_lara_integration.py — testes do cliente do Lara, do cache de
-configuração (config_hash) e da fila de envio (PT-14/PT-15,
-PLANO_DE_ACAO.md v3). Sem rede real: `requests` é substituído por um
-transporte falso, e `apply_overlay` é isolado do ffmpeg de verdade
-substituindo `_run` — o que importa aqui é a lógica de decisão (hash
-mudou? qual overlay preferir? qual exceção mapear?), não o ffmpeg em si
-(coberto pelos testes de pipeline existentes).
+"""Testes do cliente da plataforma externa, do cache de config (config_hash) e da fila de envio.
+
+Sem rede: `requests` e o ffmpeg (`_run`) são substituídos por fakes.
 """
 from __future__ import annotations
 
@@ -125,8 +120,7 @@ def test_server_error(monkeypatch):
 
 
 def test_get_cameras_parses_config_hash_and_overlay(monkeypatch):
-    # Shape real do Lara: hash do lote na raiz, lista sob "cameras", sem
-    # config_hash por item (confirmado batendo no servidor real em 2026-09-22).
+    # formato real: hash do lote na raiz e lista sob "cameras"
     body = {
         "config_hash": "abc123",
         "cameras": [
@@ -153,8 +147,7 @@ def test_get_cameras_parses_config_hash_and_overlay(monkeypatch):
 
 
 def test_get_cameras_uses_per_camera_hash_when_present(monkeypatch):
-    # Resiliência: se o Lara passar a mandar um config_hash por item no
-    # futuro, ele deve prevalecer sobre o hash do lote.
+    # um config_hash por item prevalece sobre o do lote
     body = {
         "config_hash": "batch-hash",
         "cameras": [
@@ -173,9 +166,7 @@ def test_get_cameras_uses_per_camera_hash_when_present(monkeypatch):
 
 
 def test_upload_video_sends_recorded_at_with_explicit_local_offset(monkeypatch, tmp_path):
-    # Replay.criado_em vem de datetime.now() naive, no horário local do
-    # servidor (America/Sao_Paulo). O envio anexa o offset real (-03:00)
-    # pra não depender do timezone do app do Lara.
+    # criado_em é naive (horário local); o envio anexa o offset real
     monkeypatch.setenv("TZ", "America/Sao_Paulo")
     time.tzset()
     captured = {}
@@ -208,8 +199,7 @@ def test_upload_video_sends_recorded_at_with_explicit_local_offset(monkeypatch, 
 
 
 class _FakeLaraClientForSync:
-    """Substitui LaraClient nos testes de config_sync/upload_queue — não
-    fala com requests, só devolve o que o teste configurar."""
+    """Substitui LaraClient nos testes de config_sync e upload_queue."""
 
     def __init__(self, cameras=None):
         self._cameras = cameras or []
@@ -384,9 +374,7 @@ def test_process_pending_stays_pendente_on_server_error(tmp_path):
 
 
 def test_process_pending_applies_exponential_backoff_and_skips_before_it_elapses(tmp_path):
-    """Prompt do Lara: 'retente com backoff', especificamente pro 429 —
-    sem isso, uma indisponibilidade prolongada bateria no Lara a cada
-    passada da fila pra cada replay pendente."""
+    """Em erro retentável, o atraso dobra e a fila não tenta antes de vencer."""
     engine = _make_engine(tmp_path)
     output_dir = tmp_path / "output"
     with Session(engine) as session:
@@ -403,12 +391,11 @@ def test_process_pending_applies_exponential_backoff_and_skips_before_it_elapses
         assert replay.lara_proxima_tentativa_em > datetime.now()
         primeira_proxima_tentativa = replay.lara_proxima_tentativa_em
 
-        # Antes do backoff passar, uma nova passada da fila não tenta de novo.
+        # antes do backoff vencer, não tenta de novo
         upload_queue.process_pending(session, client, output_dir)
         assert len(client.upload_calls) == 1  # não subiu
 
-        # Simula o backoff já ter passado — a próxima passada tenta de novo
-        # e, ao falhar outra vez, dobra o atraso.
+        # backoff vencido: tenta de novo e dobra o atraso
         replay.lara_proxima_tentativa_em = datetime.now()
         session.add(replay)
         session.commit()
@@ -442,12 +429,7 @@ def test_process_pending_resets_backoff_on_success(tmp_path):
 
 
 def test_process_pending_applies_backoff_on_local_processing_failure(tmp_path, monkeypatch):
-    """Achado numa auditoria: falha de processamento LOCAL (ffmpeg do
-    render/orientação/overlay, já visto na prática pelo menos uma vez em
-    produção) não era capturada em _process_one — propagava pra fora,
-    travava o resto da passada da fila e nunca aplicava backoff (batia
-    de novo a cada 10s pra sempre). RNF9 pede o mesmo tratamento de
-    qualquer outra falha retentável."""
+    """Falha local de ffmpeg não propaga: o replay fica PENDENTE com backoff."""
     engine = _make_engine(tmp_path)
     output_dir = tmp_path / "output"
     with Session(engine) as session:
@@ -471,11 +453,7 @@ def test_process_pending_applies_backoff_on_local_processing_failure(tmp_path, m
 
 
 def test_process_pending_uses_render_clip_result_and_uploads_it(tmp_path, monkeypatch):
-    """upload_queue.py delega orientação+overlay inteiramente pro
-    render_clip (integrations/render.py) — a fusão dos dois num só passe
-    de ffmpeg quando ambos se aplicam é testada a parte, em nível de
-    render.py; aqui só importa que o resultado dele vira arquivo_processado
-    e é o que é enviado ao Lara."""
+    """O resultado de render_clip vira arquivo_processado e é o arquivo enviado."""
     engine = _make_engine(tmp_path)
     output_dir = tmp_path / "output"
     with Session(engine) as session:
@@ -500,9 +478,7 @@ def test_process_pending_uses_render_clip_result_and_uploads_it(tmp_path, monkey
 
 
 def test_process_pending_chains_audio_after_render_and_cleans_intermediate(tmp_path, monkeypatch):
-    """música é o último passo da cadeia (depois do render_clip, ver
-    upload_queue.py) e o intermediário sem música não pode sobrar em
-    disco órfão."""
+    """A música entra depois do render e o intermediário sem música é apagado."""
     engine = _make_engine(tmp_path)
     output_dir = tmp_path / "output"
     music_dir = tmp_path / "music"
@@ -553,7 +529,7 @@ def test_heartbeat_failure_is_swallowed(tmp_path):
         heartbeat.send_all(session, client)  # não deve lançar
 
 
-# --- overlay: mecânica, nunca decide qual logo aplicar ---------------------
+# --- overlay ---------------------------------------------------------------
 
 
 def test_apply_overlay_returns_same_path_when_no_overlay_cached(tmp_path):
@@ -616,7 +592,7 @@ def test_apply_overlay_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypa
     assert not (tmp_path / "loc1-quadra1_20260917140000_overlay.mp4").exists()
 
 
-# --- orientation: crop mecânico pro aspect ratio pedido pelo Lara ----------
+# --- orientation -----------------------------------------------------------
 
 
 def _quadra_com_orientation(orientation: str | None) -> Quadra:
@@ -633,8 +609,7 @@ def test_apply_orientation_noop_when_not_synced_yet(tmp_path):
 
 
 def test_apply_orientation_noop_on_unknown_value(tmp_path):
-    """Defensivo: o contrato do Lara só permite vertical/horizontal, mas
-    não vale travar se algum dia vier outra coisa — ignora, não decide."""
+    """Valor desconhecido é ignorado, sem erro."""
     clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
     clip.write_bytes(b"fake")
     assert apply_orientation(clip, _quadra_com_orientation("diagonal")) == clip
@@ -696,7 +671,7 @@ def test_apply_orientation_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monk
     assert not (tmp_path / "loc1-quadra1_20260917140000_oriented.mp4").exists()
 
 
-# --- audio: mixagem local de música de fundo, nunca vem do Lara ------------
+# --- audio -----------------------------------------------------------------
 
 
 def test_apply_audio_noop_when_music_dir_missing(tmp_path):
@@ -793,7 +768,7 @@ def test_apply_audio_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypatc
     assert not (tmp_path / "loc1-quadra1_20260917140000_audio.mp4").exists()
 
 
-# --- render: funde orientação+overlay num só passe quando os dois se aplicam
+# --- render ----------------------------------------------------------------
 
 
 def _quadra_render(orientation: str | None = None, overlay_png: Path | None = None) -> Quadra:
@@ -853,11 +828,7 @@ def test_render_clip_delegates_to_apply_overlay_when_only_overlay_applies(tmp_pa
 
 
 def test_render_clip_fuses_orientation_and_overlay_into_single_ffmpeg_pass(tmp_path, monkeypatch):
-    """O achado da auditoria de CPU (2026-09-22): câmera real entrega 4:3,
-    quadra pede 16:9 (crop) E tem overlay configurado — antes disso rodava
-    2 passes completos de decode+encode (orientation.py grava
-    _oriented.mp4, overlay.py lê e regrava _oriented_overlay.mp4); agora
-    é 1 passe só, com os dois filtros fundidos."""
+    """Com crop e overlay aplicáveis, roda um único ffmpeg com os dois filtros."""
     clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
     clip.write_bytes(b"fake")
     png = tmp_path / "loc1-quadra1.png"
@@ -918,10 +889,7 @@ def test_render_clip_wraps_delegated_errors_and_cleans_up(tmp_path, monkeypatch)
 
 
 def test_render_clip_wraps_single_step_delegated_error(tmp_path, monkeypatch):
-    """render_clip devolve um único tipo de erro (RenderApplicationError)
-    pro chamador, mesmo quando a falha vem de dentro de apply_orientation
-    (que levanta OrientationApplicationError) — upload_queue.py não
-    precisa conhecer os tipos de erro internos de cada passo."""
+    """Erro de um passo delegado sai como RenderApplicationError."""
     clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
     clip.write_bytes(b"fake")
     monkeypatch.setattr("integrations.render.probe_resolution", lambda path: (1280, 960))

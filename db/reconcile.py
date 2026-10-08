@@ -1,14 +1,7 @@
-"""
-reconcile.py — reconciliação idempotente entre disco e banco (PT-03,
-M4 do PLANO_DE_ACAO.md).
+"""Recria no banco os registros de `Replay` dos clipes que existem em disco.
 
-Motivo de existir: clipes já existiam em disco antes da introdução do
-banco (PT-01/PT-02), e o disco continua sendo a fonte de verdade final
-(RNF6) — se o banco for perdido/recriado, o conteúdo já publicado em
-/clips não pode sumir da listagem/consulta. Esta rotina varre
-`output_dir` e insere só os registros de `Replay` ainda ausentes; nunca
-apaga nem sobrescreve um registro já existente (não é sincronização
-bidirecional, só recuperação de ausência).
+Só insere o que falta; nunca altera nem apaga registros existentes. Serve
+para recuperar o índice se o banco for perdido.
 """
 from __future__ import annotations
 
@@ -22,24 +15,16 @@ from sqlmodel import Session
 from clipper.clip_generator import ClipGenerationError, probe_duration_seconds
 from db.models import Quadra, Replay
 
-# Mesmo formato de nome gerado por clip_generator.generate_clip:
-# f"{quadra_id}_{ts}.mp4", ts = "%Y%m%d%H%M%S". quadra_id nunca leva "_"
-# na convenção atual (usa "-", ex. "loc1-quadra1"), então casar o último
-# "_" antes de 14 dígitos é seguro.
+# Nome gerado por clip_generator.generate_clip: <quadra_id>_<%Y%m%d%H%M%S>.mp4
 CLIP_RE = re.compile(r"^(?P<quadra_id>.+)_(?P<ts>\d{14})\.mp4$")
 
 
 def reconcile_replays(session: Session, output_dir: Path) -> int:
-    """Varre `output_dir` por clipes (`*.mp4`) sem registro em `Replay` e
-    insere o que faltar. Idempotente: rodar de novo sobre o mesmo
-    diretório não duplica nem altera registros já existentes. Retorna o
-    número de registros inseridos.
+    """Insere um `Replay` para cada `*.mp4` de `output_dir` sem registro.
+    Retorna quantos foram inseridos.
 
-    Best-effort por arquivo: um clipe corrompido (ffprobe falha) ou de
-    uma quadra desconhecida (nunca cadastrada ou removida de
-    cameras.json) é pulado com aviso, em vez de interromper a varredura
-    inteira — mesmo princípio de RNF9 (uma falha isolada não pode travar
-    o resto do sistema).
+    Clipes corrompidos ou de quadra desconhecida são pulados com aviso,
+    sem interromper a varredura.
     """
     output_dir = Path(output_dir)
     if not output_dir.is_dir():

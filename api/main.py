@@ -1,15 +1,9 @@
-"""
-main.py — API do backend central.
+"""API do backend central.
 
-Endpoint principal desta fase:
-    POST /replay/{quadra_id}
-Este é o endpoint que o firmware ESPHome do botão físico chama direto
-(via `http_request.post`) quando o botão daquela quadra é pressionado —
-sem Home Assistant no meio. Não recebe corpo — o `quadra_id` na URL já é
-toda a informação necessária.
+POST /replay/{quadra_id} é chamado direto pelo firmware do botão físico
+(sem corpo; o quadra_id na URL basta).
 
-Rodar localmente (dev):
-    uvicorn api.main:app --reload --port 8000
+Dev: uvicorn api.main:app --reload --port 8000
 """
 import secrets
 import threading
@@ -40,11 +34,7 @@ async def lifespan(app: FastAPI):
     create_db_and_tables()
     with Session(engine) as session:
         sync_cameras_from_file(session, config.CAMERAS_FILE)
-        # PT-03 (M4): recupera no banco qualquer clipe que já exista em
-        # disco mas não tenha registro (ex.: banco perdido/recriado, ou
-        # clipes anteriores à introdução do banco). Nunca sobrescreve
-        # registro existente — só preenche ausência (RNF6: disco é a
-        # fonte de verdade final).
+        # Recupera no banco clipes que existem em disco sem registro.
         recuperados = reconcile_replays(session, config.OUTPUT_DIR)
         if recuperados:
             print(f"[api] reconciliação: {recuperados} replay(s) recuperado(s) do disco.")
@@ -53,27 +43,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Replay System — backend central", lifespan=lifespan)
 
-# Clipes finais (disco persistente) ficam acessíveis publicamente em
-# /clips/<arquivo>.mp4 — é o que a página pública de cada quadra vai listar.
 config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/clips", StaticFiles(directory=str(config.OUTPUT_DIR)), name="clips")
 
-# Intervalo mínimo entre acionamentos da MESMA quadra — protege contra
-# clique duplo/repique do botão físico e contra dois cortes (caros, ~5-8s
-# de ffmpeg) rodando ao mesmo tempo pra mesma câmera.
+# Último acionamento por quadra, para o cooldown (evita dois cortes
+# simultâneos na mesma câmera).
 _last_trigger: dict[str, datetime] = {}
 _trigger_lock = threading.Lock()
 
-# --- Autenticação HTTP Basic da superfície de gerenciamento (M11) --------
+# --- HTTP Basic dos endpoints de gerenciamento -----------------------------
 _admin_security = HTTPBasic()
 
 
 def require_admin(credentials: HTTPBasicCredentials = Depends(_admin_security)) -> None:
-    """Dependência aplicada a endpoints de gerenciamento (hoje só o
-    DELETE abaixo). `secrets.compare_digest` evita vazar por timing se a
-    credencial está certa/errada. Sem ADMIN_USERNAME/ADMIN_PASSWORD
-    configurados, recusa toda requisição (deny by default, nunca um
-    usuário/senha padrão adivinhável)."""
+    """Exige HTTP Basic; sem ADMIN_USERNAME/ADMIN_PASSWORD configurados,
+    recusa tudo."""
     configured = bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD)
     user_ok = configured and secrets.compare_digest(credentials.username, config.ADMIN_USERNAME)
     pass_ok = configured and secrets.compare_digest(credentials.password, config.ADMIN_PASSWORD)
@@ -103,11 +87,7 @@ def _serialize_replay(replay: Replay) -> dict:
 
 @app.post("/replay/{quadra_id}")
 def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
-    """Aciona o corte do clipe dos últimos N segundos para `quadra_id`.
-
-    Chamado pelo firmware do botão físico daquela quadra. O momento do
-    corte é "agora", no instante em que esta chamada chega.
-    """
+    """Corta o clipe dos últimos N segundos da quadra, até o instante da chamada."""
     cameras = config.load_cameras()
     if quadra_id not in cameras:
         raise HTTPException(
@@ -135,11 +115,8 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
                 )
         _last_trigger[quadra_id] = now
 
-    # Duração do clipe vem do cache local sincronizado com o Lara
-    # (Quadra.clip_seconds, PT-14) quando já houver uma sincronização
-    # feita; nunca uma consulta ao vivo (RNF3/RNF8 do PLANO_DE_ACAO.md v3).
-    # Sem sincronização ainda (quadra recém-cadastrada), cai no default
-    # global — mesmo comportamento de antes desta integração.
+    # Duração vinda do cache local (Quadra.clip_seconds); sem sincronização
+    # ainda, usa o default global.
     quadra = session.get(Quadra, quadra_id)
     clip_seconds = (
         quadra.clip_seconds
@@ -160,15 +137,9 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
     except ClipGenerationError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # Registro no banco (M3) é best-effort: o clipe já está em disco e
-    # servível nesse ponto — disco é a fonte de verdade final (RNF6), uma
-    # falha aqui não pode impedir a entrega do replay que já foi gerado
-    # com sucesso (mesmo princípio de RNF9 pra falha de envio ao Lara). O
-    # registro nasce com lara_status=PENDENTE (default do modelo) — quem
-    # envia ao Lara é o worker de fundo (scripts/lara_worker.py), nunca
-    # este caminho de requisição. Se esse registro se perder de qualquer
-    # forma, db.reconcile.reconcile_replays (PT-03) recupera no próximo
-    # start da API, lendo o arquivo já em disco.
+    # Registro no banco é best-effort: o clipe já está em disco, e uma falha
+    # aqui não deve impedir a resposta. O reconcile recupera no próximo
+    # start. O envio fica por conta do worker (scripts/lara_worker.py).
     try:
         session.add(
             Replay(
@@ -180,7 +151,7 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
             )
         )
         session.commit()
-    except Exception as exc:  # noqa: BLE001 — best-effort, ver comentário acima
+    except Exception as exc:  # noqa: BLE001 — best-effort
         print(f"[api] aviso: falha ao registrar replay '{clip_path.stem}' no banco: {exc}")
 
     return {
@@ -192,10 +163,7 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
 
 @app.get("/api/replays/{replay_id}")
 def get_replay(replay_id: str, session: Session = Depends(get_session)):
-    """M5 (PT-04): metadados de um replay pelo identificador, sem depender
-    do nome do arquivo. Consumo público — mesmo nível de acesso que
-    `GET /quadra/{quadra_id}` já dá pro conteúdo, só que endereçável por
-    id em vez de precisar listar a quadra inteira."""
+    """Metadados de um replay pelo id."""
     replay = session.get(Replay, replay_id)
     if replay is None:
         raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
@@ -205,29 +173,12 @@ def get_replay(replay_id: str, session: Session = Depends(get_session)):
 
 @app.get("/api/replays/{replay_id}/media")
 def get_replay_media(replay_id: str, session: Session = Depends(get_session)):
-    """M6 (PT-05): entrega do vídeo em si, endereçado por replay_id (não
-    pelo nome do arquivo). Prefere `arquivo_processado` (orientação
-    recortada e/ou logo queimada, ver integrations/orientation.py e
-    integrations/overlay.py) quando o worker do Lara já processou o
-    clipe; cai pro `arquivo_bruto` senão — mesma regra de preferência do
-    envio ao Lara (integrations/upload_queue.py).
+    """Serve o vídeo do replay: o processado se existir, senão o bruto.
 
-    `FileResponse` do Starlette já implementa requisições parciais
-    (`Range`/206, `Accept-Ranges`, `ETag`) nativamente — RNF1 sem código
-    extra aqui. `no-cache` (não `immutable` nem `max-age` longo): o
-    arquivo servido para um dado replay_id troca (de bruto pro
-    processado) pouco depois da criação, quando o worker do Lara aplica
-    orientação/overlay/música — e um `max-age` qualquer (mesmo curto,
-    1h) faz o NAVEGADOR nem consultar o servidor de novo dentro da
-    janela, servindo o bruto direto do cache local mesmo depois do
-    arquivo já ter sido trocado no servidor (achado na prática em
-    2026-09-22: sócio via o vídeo logo após o clique do botão, antes do
-    processamento terminar, e ficava com o bruto em cache por até 1h).
-    `no-cache` força revalidação a cada carregamento (`If-None-Match`
-    contra o `ETag`, baseado em mtime+tamanho do arquivo real) — 304 se
-    o arquivo não mudou (sem re-baixar), 200 com o conteúdo novo assim
-    que mudar. Continua cacheável (é diferente de `no-store`), só não
-    serve stale."""
+    O FileResponse já trata Range e ETag. Usa `no-cache` porque o arquivo
+    de um mesmo replay_id passa de bruto para processado depois da
+    criação, e um max-age deixaria o navegador com o bruto em cache.
+    """
     replay = session.get(Replay, replay_id)
     if replay is None:
         raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
@@ -255,15 +206,12 @@ def list_quadra_replays(
     page_size: int = 20,
     session: Session = Depends(get_session),
 ):
-    """M7 (PT-06): listagem paginada dos replays de uma quadra, mais
-    recente primeiro, com total de itens (RNF2). Consumo público — mesma
-    justificativa do PLANO_DE_ACAO.md: usada tanto pela visualização
-    pública quanto pelo gerenciamento, não é endpoint de moderação."""
+    """Replays de uma quadra, paginados, do mais recente ao mais antigo."""
     if session.get(Quadra, quadra_id) is None:
         raise HTTPException(status_code=404, detail=f"quadra '{quadra_id}' não encontrada.")
 
     page = max(page, 1)
-    page_size = min(max(page_size, 1), 100)  # limite máximo por página (RNF2)
+    page_size = min(max(page_size, 1), 100)  # máximo por página
 
     total = session.exec(
         select(func.count()).select_from(Replay).where(Replay.quadra_id == quadra_id)
@@ -292,11 +240,7 @@ def delete_replay(
     session: Session = Depends(get_session),
     _admin: None = Depends(require_admin),
 ):
-    """M8 (PT-07): remove o registro e os arquivos (bruto e processado —
-    orientação e/ou overlay —, se houver) de um replay. Única medida de
-    moderação disponível — o conteúdo é público e sem controle de acesso
-    na visualização (M11: protegido por HTTP Basic, ao contrário de
-    M5/M6/M7)."""
+    """Remove o registro e os arquivos (bruto e processado) de um replay."""
     replay = session.get(Replay, replay_id)
     if replay is None:
         raise HTTPException(status_code=404, detail=f"replay '{replay_id}' não encontrado.")
@@ -312,16 +256,11 @@ def delete_replay(
 
 @app.get("/quadra/{quadra_id}", response_class=HTMLResponse)
 def list_replays(quadra_id: str, session: Session = Depends(get_session)):
-    """Página pública (sem login) listando os replays já cortados dessa
-    quadra, mais recente primeiro. Lê da tabela `Replay` (existe desde
-    PT-01/PT-02) em vez de fazer glob direto em OUTPUT_DIR — usar glob
-    por prefixo `{quadra_id}_*.mp4` listava CADA replay DUAS VEZES assim
-    que o worker do Lara processasse o clipe, porque `loc1-quadra1_<ts>.mp4`
-    (bruto) e `loc1-quadra1_<ts>_oriented.mp4`/`_overlay.mp4` (processado)
-    casavam os dois com o mesmo padrão. Cada `<video>` aponta pra
-    `/api/replays/{id}/media`, que já resolve sozinho qual arquivo servir
-    (processado se houver, senão o bruto — mesma regra de
-    integrations/upload_queue.py)."""
+    """Página pública com os replays da quadra, mais recente primeiro.
+
+    Lê da tabela `Replay` e não de glob em OUTPUT_DIR, que listaria o bruto
+    e o processado como itens separados.
+    """
     cameras = config.load_cameras()
     if quadra_id not in cameras:
         raise HTTPException(

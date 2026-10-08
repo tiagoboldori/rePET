@@ -1,12 +1,6 @@
-"""
-test_reconcile.py — testes da reconciliação idempotente entre disco e
-banco (PT-03, db/reconcile.py).
+"""Testes da reconciliação entre disco e banco (db/reconcile.py).
 
-`probe_duration_seconds` é substituído por monkeypatch (não chama ffprobe
-de verdade) — o que importa aqui é a lógica de varredura/decisão (quais
-arquivos casam, o que já existe, o que pertence a quadra desconhecida),
-não o ffprobe em si (coberto pelos testes de pipeline existentes). Os
-arquivos de clipe usados nos testes são vazios — só o nome importa.
+O ffprobe é substituído por monkeypatch e os clipes são arquivos vazios; só o nome importa.
 """
 from __future__ import annotations
 
@@ -67,7 +61,7 @@ def test_reconcile_inserts_missing_and_is_idempotent(tmp_path, monkeypatch):
         assert replay.duracao_segundos == 35.0
         assert replay.tamanho_bytes == len(b"fake-mp4-content")
 
-        # Rodar de novo sobre o mesmo diretório não duplica.
+        # segunda passada não duplica
         inserted_again = reconcile_module.reconcile_replays(session, output_dir)
         assert inserted_again == 0
         assert len(session.exec(select(Replay)).all()) == 1

@@ -1,15 +1,7 @@
-"""
-config_sync.py — worker de sincronização de configuração com o Lara
-(PT-14, PLANO_DE_ACAO.md v3 seção 6, item 1). Consulta `GET /cameras`
-periodicamente e só reprocessa (baixa overlay novo, atualiza a `Quadra`)
-quando o `config_hash` de uma câmera mudar em relação ao último valor
-salvo. Enquanto o hash for igual, não há nenhuma chamada de rede ou
-escrita em disco adicional — é isso que torna o pull barato, conforme o
-próprio contrato do Lara pede.
+"""Sincroniza a configuração das câmeras com a plataforma externa.
 
-Nunca roda no caminho do acionamento do botão (RNF3/RNF8 do
-PLANO_DE_ACAO.md v3) — é chamado só pelo worker de fundo
-(scripts/lara_worker.py).
+Consulta `GET /cameras` e só baixa overlay novo e atualiza a `Quadra` quando o
+`config_hash` muda. Roda só no worker de fundo, nunca no caminho do botão.
 """
 from __future__ import annotations
 
@@ -22,8 +14,7 @@ from integrations.lara_client import CameraConfig, LaraClient, LaraClientError
 
 
 def sync_once(session: Session, client: LaraClient, overlay_cache_dir: Path) -> int:
-    """Retorna quantas quadras tiveram configuração atualizada nesta
-    passada. Zero é o caso comum (nenhum config_hash mudou)."""
+    """Retorna quantas quadras tiveram a configuração atualizada."""
     try:
         cameras = client.get_cameras()
     except LaraClientError as exc:
@@ -40,10 +31,10 @@ def sync_once(session: Session, client: LaraClient, overlay_cache_dir: Path) -> 
             )
             continue
         if quadra.lara_config_hash == cam.config_hash:
-            continue  # nada mudou — pull barato, sem tocar em disco/DB
+            continue  # nada mudou
 
         if not _update_overlay_cache(client, cam, quadra, overlay_cache_dir):
-            continue  # falha ao baixar overlay: não atualiza o hash, tenta de novo no próximo pull
+            continue  # não atualiza o hash, tenta de novo no próximo ciclo
 
         quadra.orientation = cam.orientation
         quadra.clip_seconds = cam.clip_seconds
@@ -58,10 +49,8 @@ def sync_once(session: Session, client: LaraClient, overlay_cache_dir: Path) -> 
 def _update_overlay_cache(
     client: LaraClient, cam: CameraConfig, quadra: Quadra, cache_dir: Path
 ) -> bool:
-    """Baixa overlay(s) novo(s) pra disco local e atualiza os caminhos na
-    `quadra` (em memória, ainda não commitado). Devolve False em caso de
-    falha de download — quem chama decide não avançar o config_hash nesse
-    caso, pra tentar de novo no próximo ciclo."""
+    """Baixa os overlays e atualiza os caminhos na `quadra` (sem commit).
+    Devolve False se o download falhar."""
     if cam.overlay is None:
         quadra.overlay_png_path = None
         quadra.overlay_animated_path = None

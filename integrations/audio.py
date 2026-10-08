@@ -1,19 +1,6 @@
-"""
-audio.py — mixagem de música de fundo no clipe final, antes do envio ao
-Lara. Ao contrário de orientation.py/overlay.py, esta é uma decisão LOCAL
-(o contrato do Lara não tem campo de áudio, ver PLANO_DE_ACAO.md/README —
-"este sistema nunca decide" vale só pro que o Lara de fato manda).
+"""Mixagem de música de fundo no clipe final, antes do envio.
 
-Fonte da trilha: qualquer arquivo de áudio dentro de `music_dir`. Hoje
-normalmente um único arquivo (uso fixo, fase inicial), mas a escolha já é
-ALEATÓRIA entre todos os arquivos encontrados — pronta pro sorteio quando
-houver mais de uma faixa, sem precisar mexer neste módulo de novo. Pasta
-ausente/vazia = sem música (no-op silencioso, não é erro — ninguém
-configurou uma faixa ainda).
-
-Como as câmeras não entregam áudio (captura descarta/nunca inclui, ver
-capture/capture_camera.sh), o clipe final só ganha a faixa da música — não
-há áudio original pra mixar junto.
+Escolhe uma faixa aleatória de `music_dir`; sem pasta ou sem arquivos, não faz nada.
 """
 from __future__ import annotations
 
@@ -53,12 +40,8 @@ def apply_audio(
     volume: float = 0.5,
     fade_seconds: float = 1.5,
 ) -> Path:
-    """Se não houver nenhuma faixa disponível em `music_dir`, devolve
-    `clip_path` sem tocar nele (sem reencode — caso comum enquanto nenhuma
-    música foi configurada ainda). Senão, sorteia uma faixa, corta pra
-    exatamente a duração do clipe (com loop se a faixa for mais curta),
-    aplica fade in/out e volume fixo, e devolve o novo arquivo
-    (`<clip>_audio.mp4`)."""
+    """Devolve `clip_path` intacto se não houver faixa; senão gera `<clip>_audio.mp4`
+    com a música cortada na duração do clipe (em loop se for curta), com fades e volume fixo."""
     track = _pick_track(music_dir)
     if track is None:
         return clip_path

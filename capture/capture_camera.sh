@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 #
-# capture_camera.sh — captura contínua de UMA câmera, gravando em segmentos
-# curtos no buffer (tmpfs em produção, ver systemd/replay-capture@.service).
-#
-# Em produção: stream-copy puro (sem reencode) do RTSP da câmera, como já
-# definido no contexto do projeto. Cada instância deste script cuida de uma
-# quadra; rodam N instâncias em paralelo (uma por câmera) via systemd.
+# capture_camera.sh — captura contínua de uma câmera em segmentos curtos
+# no buffer (tmpfs em produção). Uma instância por quadra, via systemd.
 #
 # Uso:
 #   ./capture_camera.sh <quadra_id> <input_url> <buffer_root> [segment_time]
@@ -15,7 +11,7 @@
 #     ./capture_camera.sh loc1-quadra3 \
 #         "rtsp://user:senha@10.0.1.13:554/stream1" /var/replay
 #
-#   Teste local (SEM câmera — gera vídeo sintético só pra validar o pipeline):
+#   Teste local (vídeo sintético, sem câmera):
 #     ./capture_camera.sh test-quadra1 \
 #         "lavfi:testsrc=size=640x480:rate=15" /tmp/replay-test/buffer
 #
@@ -29,25 +25,22 @@ SEGMENT_TIME="${4:-2}"
 OUT_DIR="${BUFFER_ROOT}/${QUADRA_ID}"
 mkdir -p "$OUT_DIR"
 
-# --- Monta os argumentos de entrada e codec dependendo do tipo de fonte ---
+# --- Argumentos de entrada e codec conforme o tipo de fonte ---
 INPUT_ARGS=()
 CODEC_ARGS=()
 
 if [[ "$INPUT_URL" == rtsp://* ]]; then
-    # Câmera real: puxa via TCP (mais confiável que UDP em rede compartilhada)
-    # e faz stream-copy puro — sem reencode, CPU quase zero (câmera já entrega H264).
+    # TCP é mais confiável que UDP em rede compartilhada; stream-copy (a câmera já entrega H264).
     INPUT_ARGS=(-rtsp_transport tcp -i "$INPUT_URL")
     CODEC_ARGS=(-c copy)
 elif [[ "$INPUT_URL" == lavfi:* ]]; then
-    # Fonte sintética pra teste local sem câmera. lavfi não entrega stream
-    # comprimido, então aqui SIM precisa reencode leve (só nesse modo de teste).
-    # -re: gera os frames no ritmo de tempo real, senão o lavfi despeja tudo
-    # instantaneamente e o teste de "últimos N segundos" perde o sentido.
+    # lavfi não é comprimido, então precisa de reencode leve. -re mantém o
+    # ritmo de tempo real; sem ele o lavfi gera tudo de uma vez.
     SRC="${INPUT_URL#lavfi:}"
     INPUT_ARGS=(-re -f lavfi -i "$SRC")
     CODEC_ARGS=(-c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 30 -an)
 else
-    # Qualquer outra URL de vídeo (arquivo, http, etc.) — tratamento genérico.
+    # Outras fontes (arquivo, http, ...).
     INPUT_ARGS=(-i "$INPUT_URL")
     CODEC_ARGS=(-c copy)
 fi

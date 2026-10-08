@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# run_api_test.sh — testa o endpoint HTTP de verdade (POST /replay/{quadra_id}),
-# com um servidor uvicorn real e uma câmera sintética real. Simula o que vai
-# acontecer quando o Home Assistant chamar esse endpoint depois do botão.
+# run_api_test.sh — teste de ponta a ponta do endpoint POST /replay/{quadra_id},
+# com uvicorn real e câmera sintética.
 #
 set -euo pipefail
 
@@ -68,7 +67,7 @@ ffprobe -v error -select_streams v:0 \
 echo "== 8) Arquivo final também está salvo em disco persistente aqui: =="
 ls -la "$OUTPUT_DIR"
 
-echo "== 9) Validando que o replay foi registrado no banco (PT-02) =="
+echo "== 9) Validando que o replay foi registrado no banco =="
 REPLAY_ID=$(basename "$CLIP_URL" .mp4)
 sqlite3 "${WORKDIR}/repet_test.db" \
     "SELECT id, quadra_id, lara_status, duracao_segundos, tamanho_bytes FROM replay WHERE id = '${REPLAY_ID}';"
@@ -78,11 +77,11 @@ if [[ "$COUNT" != "1" ]]; then
     exit 1
 fi
 
-echo "== 10) Validando que a quadra foi migrada de cameras.json pro banco (PT-10) =="
+echo "== 10) Validando que a quadra foi migrada de cameras.json pro banco =="
 sqlite3 "${WORKDIR}/repet_test.db" \
     "SELECT q.id, q.nome, q.esporte_id, l.nome FROM quadra q JOIN local l ON l.id = q.local_id WHERE q.id = '${QUADRA_ID}';"
 
-echo "== 11) GET /api/replays/{replay_id} — metadados (M5/PT-04) =="
+echo "== 11) GET /api/replays/{replay_id} — metadados =="
 curl -sf "http://127.0.0.1:8123/api/replays/${REPLAY_ID}" | tee /tmp/replay-api-test/resp_meta.json; echo
 python3 -c "
 import json
@@ -96,12 +95,12 @@ assert meta['lara_status'] == 'pendente', meta
 echo "== 11.1) GET /api/replays/{replay_id} desconhecido (deve dar 404) =="
 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:8123/api/replays/replay-que-nao-existe"
 
-echo "== 12) GET /api/replays/{replay_id}/media — download integral (M6/PT-05) =="
+echo "== 12) GET /api/replays/{replay_id}/media — download integral =="
 curl -sf "http://127.0.0.1:8123/api/replays/${REPLAY_ID}/media" -o /tmp/replay-api-test/media_full.mp4
 cmp /tmp/replay-api-test/downloaded_clip.mp4 /tmp/replay-api-test/media_full.mp4 \
     && echo "OK: conteúdo idêntico ao servido em /clips"
 
-echo "== 13) GET .../media com cabeçalho Range — requisição parcial (RNF1) =="
+echo "== 13) GET .../media com cabeçalho Range — requisição parcial =="
 curl -s -D /tmp/replay-api-test/range_headers.txt -o /tmp/replay-api-test/media_partial.mp4 \
     -H "Range: bytes=0-99" "http://127.0.0.1:8123/api/replays/${REPLAY_ID}/media"
 head -n1 /tmp/replay-api-test/range_headers.txt
@@ -124,7 +123,7 @@ curl -s -o /tmp/replay-api-test/resp_ok2.json -w "HTTP %{http_code}\n" \
 cat /tmp/replay-api-test/resp_ok2.json; echo
 REPLAY_ID_2=$(python3 -c "import json;print(json.load(open('/tmp/replay-api-test/resp_ok2.json'))['clip_filename'])" | sed 's/\.mp4$//')
 
-echo "== 15) GET /api/quadras/{quadra_id}/replays — listagem paginada (M7/PT-06) =="
+echo "== 15) GET /api/quadras/{quadra_id}/replays — listagem paginada =="
 curl -sf "http://127.0.0.1:8123/api/quadras/${QUADRA_ID}/replays?page=1&page_size=1" \
     | tee /tmp/replay-api-test/resp_page1.json; echo
 python3 -c "
@@ -142,9 +141,7 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:8123/api/quadras
 
 echo "== 15.2) GET /quadra/{quadra_id} — página pública, cada replay em 1 <li> só (não 2) =="
 curl -sf "http://127.0.0.1:8123/quadra/${QUADRA_ID}" -o /tmp/replay-api-test/quadra_page.html
-# marcador de 1 item = o <p>...</p> com o id (o id também aparece dentro do
-# <video src=...>, então contar ocorrências soltas do id daria falso
-# positivo mesmo sem bug de duplicação — o item da lista é que não pode duplicar)
+# conta o <p>id</p>, já que o id também aparece no <video src=...>
 COUNT_LI_TOTAL=$(grep -o "<li>" /tmp/replay-api-test/quadra_page.html | wc -l)
 COUNT_REPLAY_1=$(grep -o "<p>${REPLAY_ID}</p>" /tmp/replay-api-test/quadra_page.html | wc -l)
 COUNT_REPLAY_2=$(grep -o "<p>${REPLAY_ID_2}</p>" /tmp/replay-api-test/quadra_page.html | wc -l)
@@ -161,7 +158,7 @@ echo "== 16.1) DELETE com credencial ERRADA (deve dar 401) =="
 curl -s -o /dev/null -w "HTTP %{http_code}\n" -X DELETE \
     -u "admin-teste:senha-errada" "http://127.0.0.1:8123/api/replays/${REPLAY_ID_2}"
 
-echo "== 16.2) DELETE com credencial certa (M8/PT-07, deve dar 204) =="
+echo "== 16.2) DELETE com credencial certa (deve dar 204) =="
 curl -s -o /dev/null -w "HTTP %{http_code}\n" -X DELETE \
     -u "admin-teste:senha-teste" "http://127.0.0.1:8123/api/replays/${REPLAY_ID_2}"
 

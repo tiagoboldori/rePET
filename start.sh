@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 #
-# start.sh — prepara o ambiente (venv + dependências), roda os testes
-# padrão do repositório com log e feedback, e garante que a API, a
-# captura de cada câmera de config/cameras.json, a limpeza do buffer
-# (retenção fixa de 2min), a retenção local dos clipes finais (S3) e,
-# se configurado, o worker do Lara estejam no ar — além de um watchdog
-# que reconfere tudo isso a cada 30s e reinicia sozinho o que cair.
+# start.sh — prepara o venv, roda os testes e sobe a API, a captura de cada
+# câmera, a limpeza do buffer, a retenção local, o worker de integração
+# (se configurado) e um watchdog que reinicia o que cair.
 #
-# Idempotente: nada disso sobe duplicata do que já estiver rodando (via
-# PID salvo em run/*.pid).
+# Idempotente: não sobe duplicata do que já roda (PIDs em run/*.pid).
 #
 # Uso: ./start.sh
 #
-set -uo pipefail   # sem -e de propósito: quero seguir e reportar falha de teste, não abortar o script
+set -uo pipefail   # sem -e: falha de teste é reportada, não aborta o script
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -32,16 +28,9 @@ echo "== rePET start.sh =="
 echo
 
 # --- 0) Carrega .env local, se existir ----------------------------------
-# Credenciais (LARA_BASE_URL, REPLAY_API_TOKEN, ADMIN_USERNAME,
-# ADMIN_PASSWORD) e ajustes finos opcionais NÃO têm default de propósito
-# (ver api/config.py) — sem isso, cada sessão de shell nova exigiria
-# `export` manual antes de rodar este script, o que não sobrevive a
-# reboot nem é prático em produção. Mesmo padrão já usado em
-# config/cameras.json: arquivo real gitignored, `.env.example` versionado
-# como modelo (`cp .env.example .env` e preencher). Valores que já vêm de
-# variável de ambiente do chamador (ex.: systemd EnvironmentFile=, ou um
-# `export` manual) continuam tendo prioridade — `.env` só preenche o que
-# ainda não estiver setado.
+# Credenciais e ajustes opcionais vêm do .env (modelo em .env.example).
+# Variável já exportada no ambiente tem prioridade; o .env só preenche o
+# que falta.
 if [[ -f "$ROOT/.env" ]]; then
     info "Carregando $ROOT/.env (variável já exportada no ambiente tem prioridade) ..."
     while IFS='=' read -r key value; do
@@ -108,18 +97,14 @@ else
 fi
 echo
 
-# --- 3) Sobe API, captura, limpeza, retenção local e worker do Lara -----
-# LARA_BASE_URL/REPLAY_API_TOKEN/ADMIN_USERNAME/ADMIN_PASSWORD não têm
-# default aqui de propósito — são credencial/endereço de outro sistema
-# (ou credencial de admin), não algo pra inventar. Preencha `.env` (ver
-# passo 0 acima) quando estiver pronto pra ligar; até lá, o worker do
-# Lara fica fora do ar e o resto do sistema continua funcionando
-# normalmente (RNF9 — nada disso bloqueia o botão).
+# --- 3) Sobe API, captura, limpeza, retenção local e worker -------------
+# Sem as credenciais no .env o worker de integração não sobe; o resto
+# funciona normalmente.
 export BUFFER_ROOT="$ROOT/.data/buffer"
 export OUTPUT_DIR="$ROOT/.data/output"
 export CAMERAS_FILE="$ROOT/config/cameras.json"
-export DATABASE_URL="sqlite:///$ROOT/.data/repet.db"   # lida por db/engine.py, ver README
-export SEGMENT_TIME=2   # precisa ser o mesmo valor pra API e pra captura — fonte única aqui
+export DATABASE_URL="sqlite:///$ROOT/.data/repet.db"   # lida por db/engine.py
+export SEGMENT_TIME=2   # API e captura precisam usar o mesmo valor
 export OVERLAY_CACHE_DIR="$ROOT/.data/overlays"
 mkdir -p "$BUFFER_ROOT" "$OUTPUT_DIR" "$OVERLAY_CACHE_DIR"
 
@@ -127,14 +112,10 @@ info "Conferindo/subindo serviços (API, captura, limpeza, retenção local, wor
 ROOT="$ROOT" bash "$ROOT/scripts/ensure_services.sh"
 echo
 
-# --- 4) Sobe o watchdog (supervisão contínua, ver seção "Watchdog" no README) --
-# Checagem extra (não só kill -0 no PID salvo): ver check_no_foreign_duplicate
-# em scripts/ensure_services.sh — mesmo raciocínio se aplica aqui, com um
-# agravante: o watchdog É o processo que sobe tudo mais. Dois watchdogs
-# concorrentes de usuários diferentes (achado real em 2026-09-22, ver
-# memória do projeto) é justamente o que causou dezenas de captura
-# duplicada — pgrep -f enxerga processo de outro usuário mesmo quando
-# kill -0 não consegue (sem permissão de sinal entre usuários diferentes).
+# --- 4) Sobe o watchdog ---------------------------------------------------
+# Além do kill -0 no PID salvo, usa pgrep -f, que enxerga processos de
+# outros usuários (kill -0 não). Dois watchdogs concorrentes duplicariam
+# as capturas.
 WATCHDOG_PID_FILE="$RUN_DIR/watchdog.pid"
 WATCHDOG_FOREIGN="$(pgrep -f -- "scripts/watchdog_loop.sh" 2>/dev/null | grep -vx "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null || true)" || true)"
 if [[ -f "$WATCHDOG_PID_FILE" ]] && kill -0 "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null; then

@@ -1,5 +1,5 @@
 [Unit]
-Description=Retenção local dos clipes finais do rePET (S3 — não é a entrega ao sócio, essa é do Lara)
+Description=Retenção local dos clipes finais do rePET
 After=network-online.target
 
 [Service]

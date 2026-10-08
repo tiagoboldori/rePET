@@ -232,3 +232,8 @@ __marimo__/
 /assets/music/*
 !/assets/music/.gitkeep
 !/assets/music/README.md
+
+# Contexto/memória local de assistentes de IA — nunca versionar
+/.claude/
+CLAUDE.md
+.claude.json

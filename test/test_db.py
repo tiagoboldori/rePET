@@ -1,13 +1,6 @@
-"""
-test_db.py — testes da camada de persistência (PT-01) e da migração de
-câmeras a partir de arquivo (PT-10).
+"""Testes da camada de persistência e da migração de câmeras a partir de arquivo.
 
-Usa um SQLite próprio em arquivo temporário (via tmp_path do pytest), não
-o .data/repet.db de dev — isolado e descartado a cada execução. Sempre via
-create_sqlite_engine() (não create_engine puro), pra que os testes rodem
-com os mesmos PRAGMAs (WAL, foreign_keys) que a aplicação real usa —
-senão a integridade referencial testada abaixo não seria validada de
-verdade.
+Usa SQLite temporário via create_sqlite_engine, com os mesmos PRAGMAs da aplicação.
 """
 import json
 from datetime import datetime, timedelta
@@ -28,8 +21,7 @@ def _make_engine(tmp_path, name="test_repet.db"):
 
 
 def _seed_quadra(session: Session, quadra_id: str, local_id: str = "loc1") -> None:
-    """Cria a cadeia Local -> Esporte -> Quadra mínima pra satisfazer a FK
-    de Replay.quadra_id."""
+    """Cria Local, Esporte e Quadra para satisfazer a FK de Replay.quadra_id."""
     if session.get(Local, local_id) is None:
         session.add(Local(id=local_id, nome=local_id.capitalize()))
     if session.get(Esporte, "futsal") is None:
@@ -103,9 +95,7 @@ def test_create_tables_and_roundtrip(tmp_path):
 
 
 def test_replay_requires_existing_quadra(tmp_path):
-    """Integridade referencial de verdade: Replay.quadra_id agora tem FK
-    formal pra Quadra (desde PT-10) — inserir um replay pra uma quadra que
-    não existe deve falhar, não ficar órfão silenciosamente."""
+    """Replay para quadra inexistente deve falhar na FK."""
     engine = _make_engine(tmp_path)
 
     with Session(engine) as session:
@@ -127,12 +117,7 @@ def test_replay_requires_existing_quadra(tmp_path):
 
 
 def test_create_db_and_tables_creates_replay(tmp_path, monkeypatch):
-    """Cobre especificamente a função que os callers reais (main.py) usam,
-    não só o padrão create_all direto dos outros testes deste arquivo.
-    Existe por causa de um bug real encontrado manualmente: chamar
-    create_all sem antes importar db.models não cria nenhuma tabela, porque
-    SQLModel.metadata só registra classes já importadas — por isso
-    create_db_and_tables() importa db.models internamente."""
+    """create_db_and_tables cria as tabelas (ele importa db.models internamente)."""
     db_path = tmp_path / "startup_repet.db"
     fresh_engine = engine_module.create_sqlite_engine(f"sqlite:///{db_path}")
     monkeypatch.setattr(engine_module, "engine", fresh_engine)
@@ -195,7 +180,7 @@ def test_sync_cameras_from_file_is_idempotent(tmp_path):
         assert quadra1.esporte_id == "futsal"
         assert quadra1.input_url == "rtsp://user:senha@10.0.1.11:554/stream1"
 
-    # roda de novo com um dado alterado — precisa atualizar, não duplicar
+    # segunda passada com dado alterado: atualiza, não duplica
     cameras_file.write_text(
         json.dumps(
             [
