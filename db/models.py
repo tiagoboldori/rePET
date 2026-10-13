@@ -61,6 +61,9 @@ class Replay(SQLModel, table=True):
     # Estado do envio (integrations/upload_queue.py).
     lara_status: ReplayLaraStatus = Field(default=ReplayLaraStatus.PENDENTE)
     lara_uuid: str | None = Field(default=None)
+    # Caminho do clipe no FTP (relativo à pasta do Lara), preenchido quando o
+    # upload termina; o que retenta depois é só o aviso ao Lara.
+    lara_ftp_path: str | None = Field(default=None)
     lara_enviado_em: datetime | None = Field(default=None)
     lara_ultimo_erro: str | None = Field(default=None)
 

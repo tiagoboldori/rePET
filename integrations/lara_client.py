@@ -26,15 +26,12 @@ class LaraNotFoundError(LaraClientError):
 
 
 class LaraValidationError(LaraClientError):
-    """422 com corpo — dados inválidos; retentar sem corrigir não adianta."""
+    """422 — arquivo não encontrado no FTP, caminho ou dados inválidos; retentar
+    sem corrigir não adianta."""
 
     def __init__(self, message: str, body: dict | None = None):
         super().__init__(message)
         self.body = body
-
-
-class LaraPayloadTooLargeError(LaraClientError):
-    """413, ou 422 com corpo vazio — limite do servidor web; retentar não resolve."""
 
 
 class LaraRateLimitError(LaraClientError):
@@ -68,6 +65,7 @@ class UploadResult:
     url: str
     expires_at: str
     duplicated: bool
+    path: str | None = None
 
 
 def _parse_overlay(raw: dict | None) -> OverlayConfig | None:
@@ -120,22 +118,14 @@ class LaraClient:
             )
         if resp.status_code == 404:
             raise LaraNotFoundError(f"404 do Lara em {path} — external_id desconhecido.")
-        if resp.status_code == 413:
-            raise LaraPayloadTooLargeError(
-                f"413 do Lara em {path} — arquivo acima do limite do servidor web."
-            )
         if resp.status_code == 422:
             body = None
             try:
                 body = resp.json()
             except ValueError:
                 pass
-            if not body:
-                raise LaraPayloadTooLargeError(
-                    f"422 com corpo vazio em {path} — provável limite de servidor web."
-                )
             raise LaraValidationError(
-                body.get("message", f"422 do Lara em {path}"), body=body
+                (body or {}).get("message", f"422 do Lara em {path}"), body=body
             )
         if resp.status_code == 429:
             raise LaraRateLimitError(f"429 do Lara em {path} — respeitar backoff.")
@@ -169,37 +159,37 @@ class LaraClient:
     def send_heartbeat(self, external_id: str) -> None:
         self._request("POST", f"/cameras/{external_id}/heartbeat")
 
-    def upload_video(
+    def notify_video(
         self,
         external_id: str,
-        file_path: Path,
+        path: str,
         recorded_at: datetime,
         duration_seconds: int,
         clip_external_id: str,
     ) -> UploadResult:
-        """`clip_external_id` é o Replay.id e torna o envio idempotente.
+        """Avisa o Lara de que o clipe já está no FTP (`path` relativo à pasta do
+        Lara). `clip_external_id` é o Replay.id e torna o aviso idempotente.
         `recorded_at` é o instante do botão, não do envio."""
         # naive vem de datetime.now(); astimezone() anexa o offset local
         if recorded_at.tzinfo is None:
             recorded_at = recorded_at.astimezone()
-        with file_path.open("rb") as fh:
-            resp = self._request(
-                "POST",
-                f"/cameras/{external_id}/videos",
-                files={"file": (file_path.name, fh)},
-                data={
-                    "recorded_at": recorded_at.isoformat(),
-                    "duration_seconds": str(int(duration_seconds)),
-                    "external_id": clip_external_id,
-                },
-                timeout=max(self._timeout, 60.0),  # upload de até 256MB
-            )
+        resp = self._request(
+            "POST",
+            f"/cameras/{external_id}/videos",
+            json={
+                "path": path,
+                "recorded_at": recorded_at.isoformat(),
+                "duration_seconds": int(duration_seconds),
+                "external_id": clip_external_id,
+            },
+        )
         body = resp.json()
         return UploadResult(
             uuid=body["uuid"],
             url=body["url"],
             expires_at=body["expires_at"],
             duplicated=bool(body.get("duplicated", False)),
+            path=body.get("path"),
         )
 
     def download_to(self, url: str, dest: Path) -> None:

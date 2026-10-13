@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Diagnóstico da integração: chama `/ping` e `/cameras` ao vivo e compara, por
+"""Diagnóstico da integração: testa o FTP (conexão e escrita em Lara/Repet/), chama
+`/ping` e `/cameras` ao vivo e compara, por
 câmera, a config publicada com a do cache local e o estado do overlay.
 Só relata, não altera nada.
 
@@ -15,6 +16,7 @@ from sqlmodel import Session, select
 from api import config
 from db.engine import create_db_and_tables, engine
 from db.models import Quadra
+from integrations.ftp_client import FtpClient, FtpClientError
 from integrations.lara_client import CameraConfig, LaraClient, LaraClientError
 
 
@@ -37,6 +39,17 @@ def main() -> None:
         print(f"FALHOU: {exc}")
         return
 
+    print("== FTP ==")
+    try:
+        ftp = FtpClient(
+            config.FTP_HOST, config.FTP_PORT, config.FTP_USER, config.FTP_PASSWORD,
+            config.FTP_BASE_DIR, config.FTP_TIMEOUT_SECONDS,
+        )
+        print(f"{config.FTP_HOST}:{config.FTP_PORT} — {ftp.check_write_access()}")
+    except (ValueError, FtpClientError) as exc:
+        print(f"FALHOU: {exc}")
+
+    print()
     print("== /ping ==")
     try:
         print(client.ping())

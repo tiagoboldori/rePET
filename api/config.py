@@ -38,6 +38,16 @@ LARA_BASE_URL = os.environ.get("LARA_BASE_URL", "")
 # Token Sanctum (`php artisan replay:token`); só via variável de ambiente.
 REPLAY_API_TOKEN = os.environ.get("REPLAY_API_TOKEN", "")
 
+# --- FTP do clube (destino dos clipes; o Lara só recebe o caminho) ---------
+# Credenciais só via variável de ambiente (.env), nunca no código.
+FTP_HOST = os.environ.get("FTP_HOST", "")
+FTP_PORT = int(os.environ.get("FTP_PORT", "21"))
+FTP_USER = os.environ.get("FTP_USER", "")
+FTP_PASSWORD = os.environ.get("FTP_PASSWORD", "")
+# Pasta do Lara no FTP; o caminho avisado ao Lara é relativo a ela.
+FTP_BASE_DIR = os.environ.get("FTP_BASE_DIR", "Lara/Repet")
+FTP_TIMEOUT_SECONDS = float(os.environ.get("FTP_TIMEOUT_SECONDS", "60"))
+
 # Cache local dos overlays baixados (um arquivo por quadra).
 OVERLAY_CACHE_DIR = Path(os.environ.get("OVERLAY_CACHE_DIR", "/var/replay/overlays"))
 

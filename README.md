@@ -49,7 +49,7 @@ Toda a integração fica em `integrations/` e roda no worker
 | Rotina | O que faz |
 |---|---|
 | **Sync de config** (`config_sync.py`) | `GET /cameras`, com cache por `config_hash`; baixa overlay novo e atualiza a `Quadra` local (orientação, duração, overlay) |
-| **Fila de envio** (`upload_queue.py`) | Processa cada `Replay` pendente: render → música → upload. Idempotente por `external_id` (= `Replay.id`) |
+| **Fila de envio** (`upload_queue.py`) | Processa cada `Replay` pendente: render → música → upload ao FTP → aviso ao Lara. Idempotente por `external_id` (= `Replay.id`) |
 | **Heartbeat** (`heartbeat.py`) | Avisa periodicamente que cada câmera está viva; falha só loga |
 
 **Processamento antes do envio**, nesta ordem:
@@ -64,16 +64,27 @@ Toda a integração fica em `integrations/` e roda no worker
    do clipe, com fade in/out. Sem faixas, é no-op. As câmeras não têm
    áudio, então só entra a trilha.
 
-O arquivo final fica em `Replay.arquivo_processado` e é o que é enviado.
+O arquivo final fica em `Replay.arquivo_processado` e é o que vai para o FTP.
 
-**Envio:** `POST {LARA_BASE_URL}/cameras/{id}/videos` (multipart) com
-`Authorization: Bearer <REPLAY_API_TOKEN>`, `recorded_at` (instante do
-botão, em horário local com offset explícito, ex. `-03:00`),
-`duration_seconds` e `external_id`. Falha transitória (401/403/404/429/5xx/
-rede) é retentada com backoff exponencial por replay (10s, 20s, 40s… teto
-de 10 min); 422/413 são falhas definitivas, sem retry.
+**Envio em duas etapas:**
 
-Diagnóstico ao vivo (chama `/ping` e `/cameras` e compara com o cache local):
+1. **FTP do clube** (`ftp_client.py`): o clipe é gravado em
+   `<FTP_BASE_DIR>/<quadra_id>/<AAAA-MM-DD>/<HHh00>/<id do clipe>.mp4`
+   (`FTP_BASE_DIR` = `Lara/Repet`; dia e hora vêm do `recorded_at` local; a pasta
+   da hora é a hora fechada, sem `:` por causa de Windows/FTP). O upload vai para
+   `.part` e é renomeado no fim. O caminho fica em `Replay.lara_ftp_path`.
+2. **Aviso ao Lara:** `POST {LARA_BASE_URL}/cameras/{id}/videos` em JSON, com
+   `Authorization: Bearer <REPLAY_API_TOKEN>`, `path` (relativo a `Lara/Repet/`),
+   `recorded_at` (instante do botão, em horário local com offset explícito, ex.
+   `-03:00`), `duration_seconds` e `external_id`. Sem arquivo na requisição.
+
+Depois do `201`/`200`, o clipe no FTP é do Lara (ele apaga aos 7 dias): este
+sistema não mexe mais nele, e a retenção local só varre `OUTPUT_DIR`. Falha
+transitória (FTP, 401/403/404/429/5xx incl. 503/rede) é retentada com backoff
+exponencial por replay (10s, 20s, 40s… teto de 10 min); se o upload ao FTP já
+terminou, só o aviso é retentado. 422 é falha definitiva, sem retry.
+
+Diagnóstico ao vivo (testa conexão e escrita no FTP, chama `/ping` e `/cameras` e compara com o cache local):
 
 ```bash
 python -m scripts.lara_diagnostic
@@ -159,6 +170,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 |---|---|---|
 | `LARA_BASE_URL` | — (obrigatória p/ integração) | Base da API da plataforma externa, ex. `https://plataforma.example/api/replay` |
 | `REPLAY_API_TOKEN` | — (obrigatória p/ integração) | Token Sanctum, gerado com `php artisan replay:token` na plataforma |
+| `FTP_HOST` / `FTP_USER` / `FTP_PASSWORD` | — (obrigatórias p/ integração) | Servidor de arquivos do clube; sem eles o worker não sobe |
+| `FTP_PORT` / `FTP_BASE_DIR` / `FTP_TIMEOUT_SECONDS` | `21` / `Lara/Repet` / `60` | Porta, pasta do Lara no FTP e timeout |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Credencial do `DELETE`; vazio = sempre `401` |
 | `BUFFER_ROOT` | `/var/replay` | Segmentos brutos (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) |
 | `OUTPUT_DIR` | `/var/replay/output` | Clipes finais (`<quadra_id>_<timestamp>.mp4`, mais variantes `_oriented`/`_overlay`) |

@@ -1,7 +1,7 @@
 """Engine SQLite e fábrica de sessões. Lê DATABASE_URL direto do ambiente.
 
-Sem Alembic: create_all() só cria o que falta, então mudanças de schema
-exigem apagar .data/repet.db.
+Sem Alembic: create_all() só cria o que falta; colunas novas e nuláveis entram
+em _add_missing_columns(), outras mudanças de schema exigem apagar .data/repet.db.
 """
 import os
 from collections.abc import Generator
@@ -39,6 +39,23 @@ def create_db_and_tables() -> None:
     from db import models  # noqa: F401
 
     SQLModel.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """create_all não altera tabelas existentes; colunas novas e nuláveis entram aqui."""
+    from sqlalchemy import inspect, text
+
+    wanted = {"replay": {"lara_ftp_path": "VARCHAR"}}
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, columns in wanted.items():
+            if not insp.has_table(table):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table)}
+            for name, ddl in columns.items():
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
 
 def get_session() -> Generator[Session, None, None]:

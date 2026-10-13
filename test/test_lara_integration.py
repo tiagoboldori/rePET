@@ -14,12 +14,12 @@ from sqlmodel import Session, SQLModel, select
 from db import engine as engine_module
 from db.models import Esporte, Local, Quadra, Replay, ReplayLaraStatus
 from integrations import config_sync, heartbeat, upload_queue
+from integrations.ftp_client import FtpClientError, build_remote_path
 from integrations.lara_client import (
     CameraConfig,
     LaraAuthError,
     LaraClient,
     LaraNotFoundError,
-    LaraPayloadTooLargeError,
     LaraRateLimitError,
     LaraServerError,
     LaraValidationError,
@@ -95,15 +95,15 @@ def test_validation_error_with_body(monkeypatch):
         client.send_heartbeat("loc1-quadra1")
 
 
-def test_payload_too_large_on_422_empty_body(monkeypatch):
+def test_validation_error_on_422_empty_body(monkeypatch):
     client = _client_with_fake_response(monkeypatch, _FakeResponse(422, json_body=None))
-    with pytest.raises(LaraPayloadTooLargeError):
+    with pytest.raises(LaraValidationError):
         client.send_heartbeat("loc1-quadra1")
 
 
-def test_payload_too_large_on_413(monkeypatch):
-    client = _client_with_fake_response(monkeypatch, _FakeResponse(413))
-    with pytest.raises(LaraPayloadTooLargeError):
+def test_service_unavailable_503_is_retryable_server_error(monkeypatch):
+    client = _client_with_fake_response(monkeypatch, _FakeResponse(503))
+    with pytest.raises(LaraServerError):
         client.send_heartbeat("loc1-quadra1")
 
 
@@ -165,37 +165,67 @@ def test_get_cameras_uses_per_camera_hash_when_present(monkeypatch):
     assert cameras[0].config_hash == "own-hash"
 
 
-def test_upload_video_sends_recorded_at_with_explicit_local_offset(monkeypatch, tmp_path):
-    # criado_em é naive (horário local); o envio anexa o offset real
+def test_notify_video_sends_json_with_path_and_explicit_local_offset(monkeypatch):
+    # criado_em é naive (horário local); o aviso anexa o offset real
     monkeypatch.setenv("TZ", "America/Sao_Paulo")
     time.tzset()
     captured = {}
 
     def fake_request(method, url, **kwargs):
         captured.update(kwargs)
+        captured["url"] = url
         return _FakeResponse(
             201,
-            json_body={"uuid": "u1", "url": "https://lara.example/u1", "expires_at": "2026-09-29T00:00:00-03:00"},
+            json_body={
+                "uuid": "u1",
+                "url": "https://lara.example/u1",
+                "path": "loc1-quadra1/2026-09-22/13h00/replay-1.mp4",
+                "expires_at": "2026-09-29T00:00:00-03:00",
+            },
         )
 
     client = LaraClient(base_url="https://lara.example/api/replay", token="1|abc")
     monkeypatch.setattr(client._session, "request", fake_request)
 
-    clip = tmp_path / "clip.mp4"
-    clip.write_bytes(b"fake")
-
-    client.upload_video(
+    result = client.notify_video(
         external_id="loc1-quadra1",
-        file_path=clip,
+        path="loc1-quadra1/2026-09-22/13h00/replay-1.mp4",
         recorded_at=datetime(2026, 9, 22, 13, 37, 49),  # naive, horário local
         duration_seconds=35,
         clip_external_id="replay-1",
     )
 
-    assert captured["data"]["recorded_at"] == "2026-09-22T13:37:49-03:00"
+    assert captured["url"].endswith("/cameras/loc1-quadra1/videos")
+    assert "files" not in captured and "data" not in captured  # JSON, sem multipart
+    assert captured["json"] == {
+        "path": "loc1-quadra1/2026-09-22/13h00/replay-1.mp4",
+        "recorded_at": "2026-09-22T13:37:49-03:00",
+        "duration_seconds": 35,
+        "external_id": "replay-1",
+    }
+    assert result.path == "loc1-quadra1/2026-09-22/13h00/replay-1.mp4"
+
+
+def test_build_remote_path_uses_quadra_day_and_closed_hour_folders():
+    path = build_remote_path("loc1-quadra1", datetime(2026, 10, 13, 15, 15, 11), "loc1-quadra1_20261013151511")
+    assert path == "loc1-quadra1/2026-10-13/15h00/loc1-quadra1_20261013151511.mp4"
 
 
 # --- config_sync: config_hash como cache barato ----------------------------
+
+
+class _FakeFtp:
+    """Substitui FtpClient: registra (nome do arquivo local, caminho remoto)."""
+
+    def __init__(self):
+        self.uploads: list[tuple[str, str]] = []
+        self.exception = None
+
+    def upload(self, local_path: Path, remote_rel_path: str) -> str:
+        if self.exception:
+            raise self.exception
+        self.uploads.append((local_path.name, remote_rel_path))
+        return remote_rel_path
 
 
 class _FakeLaraClientForSync:
@@ -217,7 +247,7 @@ class _FakeLaraClientForSync:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"fake")
 
-    def upload_video(self, **kwargs):
+    def notify_video(self, **kwargs):
         self.upload_calls.append(kwargs)
         if self._upload_exception:
             raise self._upload_exception
@@ -333,13 +363,17 @@ def test_process_pending_marks_enviado_on_success(tmp_path):
         _seed_pending_replay(session, output_dir)
 
         client = _FakeLaraClientForSync()
-        upload_queue.process_pending(session, client, output_dir)
+        ftp = _FakeFtp()
+        upload_queue.process_pending(session, client, ftp, output_dir)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.ENVIADO
         assert replay.lara_uuid == "u1"
         assert len(client.upload_calls) == 1
         assert client.upload_calls[0]["clip_external_id"] == replay.id
+        assert replay.lara_ftp_path == "loc1-quadra1/2026-09-17/14h00/loc1-quadra1_20260917140000.mp4"
+        assert client.upload_calls[0]["path"] == replay.lara_ftp_path
+        assert "file_path" not in client.upload_calls[0]
 
 
 def test_process_pending_marks_falha_on_validation_error(tmp_path):
@@ -350,8 +384,9 @@ def test_process_pending_marks_falha_on_validation_error(tmp_path):
         _seed_pending_replay(session, output_dir)
 
         client = _FakeLaraClientForSync()
+        ftp = _FakeFtp()
         client._upload_exception = LaraValidationError("campo faltando")
-        upload_queue.process_pending(session, client, output_dir)
+        upload_queue.process_pending(session, client, ftp, output_dir)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.FALHA
@@ -366,8 +401,9 @@ def test_process_pending_stays_pendente_on_server_error(tmp_path):
         _seed_pending_replay(session, output_dir)
 
         client = _FakeLaraClientForSync()
+        ftp = _FakeFtp()
         client._upload_exception = LaraServerError("500 do Lara")
-        upload_queue.process_pending(session, client, output_dir)
+        upload_queue.process_pending(session, client, ftp, output_dir)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.PENDENTE  # retentável — próxima passada tenta de novo
@@ -382,9 +418,10 @@ def test_process_pending_applies_exponential_backoff_and_skips_before_it_elapses
         _seed_pending_replay(session, output_dir)
 
         client = _FakeLaraClientForSync()
+        ftp = _FakeFtp()
         client._upload_exception = LaraRateLimitError("429 do Lara")
 
-        upload_queue.process_pending(session, client, output_dir)
+        upload_queue.process_pending(session, client, ftp, output_dir)
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.PENDENTE
         assert replay.lara_tentativas == 1
@@ -392,14 +429,14 @@ def test_process_pending_applies_exponential_backoff_and_skips_before_it_elapses
         primeira_proxima_tentativa = replay.lara_proxima_tentativa_em
 
         # antes do backoff vencer, não tenta de novo
-        upload_queue.process_pending(session, client, output_dir)
+        upload_queue.process_pending(session, client, ftp, output_dir)
         assert len(client.upload_calls) == 1  # não subiu
 
         # backoff vencido: tenta de novo e dobra o atraso
         replay.lara_proxima_tentativa_em = datetime.now()
         session.add(replay)
         session.commit()
-        upload_queue.process_pending(session, client, output_dir)
+        upload_queue.process_pending(session, client, ftp, output_dir)
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert len(client.upload_calls) == 2
         assert replay.lara_tentativas == 2
@@ -420,7 +457,8 @@ def test_process_pending_resets_backoff_on_success(tmp_path):
         session.commit()
 
         client = _FakeLaraClientForSync()
-        upload_queue.process_pending(session, client, output_dir)
+        ftp = _FakeFtp()
+        upload_queue.process_pending(session, client, ftp, output_dir)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.ENVIADO
@@ -442,7 +480,8 @@ def test_process_pending_applies_backoff_on_local_processing_failure(tmp_path, m
         monkeypatch.setattr(upload_queue, "render_clip", _boom)
 
         client = _FakeLaraClientForSync()
-        upload_queue.process_pending(session, client, output_dir)
+        ftp = _FakeFtp()
+        upload_queue.process_pending(session, client, ftp, output_dir)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.PENDENTE  # não é FALHA definitiva
@@ -469,12 +508,13 @@ def test_process_pending_uses_render_clip_result_and_uploads_it(tmp_path, monkey
         monkeypatch.setattr(upload_queue, "render_clip", _fake_render)
 
         client = _FakeLaraClientForSync()
-        upload_queue.process_pending(session, client, output_dir)
+        ftp = _FakeFtp()
+        upload_queue.process_pending(session, client, ftp, output_dir)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.ENVIADO
         assert replay.arquivo_processado == f"{clip_path.stem}_oriented_overlay.mp4"
-        assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_oriented_overlay.mp4"
+        assert ftp.uploads[0][0] == f"{clip_path.stem}_oriented_overlay.mp4"
 
 
 def test_process_pending_chains_audio_after_render_and_cleans_intermediate(tmp_path, monkeypatch):
@@ -503,14 +543,64 @@ def test_process_pending_chains_audio_after_render_and_cleans_intermediate(tmp_p
         monkeypatch.setattr(upload_queue, "apply_audio", _fake_audio)
 
         client = _FakeLaraClientForSync()
-        upload_queue.process_pending(session, client, output_dir, music_dir)
+        ftp = _FakeFtp()
+        upload_queue.process_pending(session, client, ftp, output_dir, music_dir)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.ENVIADO
         assert replay.arquivo_processado == f"{clip_path.stem}_oriented_overlay_audio.mp4"
         assert not (output_dir / f"{clip_path.stem}_oriented_overlay.mp4").exists()  # intermediário limpo
         assert (output_dir / f"{clip_path.stem}_oriented_overlay_audio.mp4").exists()  # final preservado
-        assert client.upload_calls[0]["file_path"].name == f"{clip_path.stem}_oriented_overlay_audio.mp4"
+        assert ftp.uploads[0][0] == f"{clip_path.stem}_oriented_overlay_audio.mp4"
+
+
+def test_process_pending_ftp_failure_keeps_pendente_with_backoff_and_does_not_notify(tmp_path):
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        _seed_pending_replay(session, output_dir)
+
+        client = _FakeLaraClientForSync()
+        ftp = _FakeFtp()
+        ftp.exception = FtpClientError("connection refused")
+        upload_queue.process_pending(session, client, ftp, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.PENDENTE
+        assert replay.lara_ftp_path is None
+        assert replay.lara_tentativas == 1
+        assert "connection refused" in replay.lara_ultimo_erro
+        assert client.upload_calls == []  # sem arquivo no FTP, nada a avisar
+
+
+def test_process_pending_retries_only_the_notice_after_ftp_upload_done(tmp_path):
+    engine = _make_engine(tmp_path)
+    output_dir = tmp_path / "output"
+    with Session(engine) as session:
+        _seed_quadra(session)
+        _seed_pending_replay(session, output_dir)
+
+        client = _FakeLaraClientForSync()
+        ftp = _FakeFtp()
+        client._upload_exception = LaraServerError("503 do Lara")  # Lara sem acesso ao FTP
+        upload_queue.process_pending(session, client, ftp, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.PENDENTE
+        assert replay.lara_ftp_path is not None  # upload ao FTP já ficou registrado
+        assert len(ftp.uploads) == 1
+
+        client._upload_exception = None
+        replay.lara_proxima_tentativa_em = datetime.now()
+        session.add(replay)
+        session.commit()
+        upload_queue.process_pending(session, client, ftp, output_dir)
+
+        replay = session.get(Replay, "loc1-quadra1_20260917140000")
+        assert replay.lara_status == ReplayLaraStatus.ENVIADO
+        assert len(ftp.uploads) == 1  # não subiu de novo
+        assert len(client.upload_calls) == 2
 
 
 # --- heartbeat: falha não propaga ------------------------------------------
@@ -521,6 +611,7 @@ def test_heartbeat_failure_is_swallowed(tmp_path):
     with Session(engine) as session:
         _seed_quadra(session)
         client = _FakeLaraClientForSync()
+        ftp = _FakeFtp()
 
         def _boom(external_id):
             raise LaraServerError("indisponível")
