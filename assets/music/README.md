@@ -16,6 +16,10 @@ com loop só como fallback se a faixa for mais curta que o clipe, mais
 fade in/out e volume fixo (`MUSIC_VOLUME`, `MUSIC_FADE_SECONDS` em
 `.env`/`api/config.py`). Ver `integrations/audio.py`.
 
+Se o clipe tem o áudio da câmera (som ambiente), ele segue **por baixo** da
+música, em `AMBIENT_VOLUME` (`0` = só a música). Sem áudio da câmera, ou se a
+mixagem com ele falhar, o clipe sai só com a música.
+
 **Estado atual (2026-10-16):** nove faixas do catálogo NCS (NoCopyrightSounds,
 <https://ncs.io>), todas com 2–4 min, bem mais longas que qualquer clipe (~35s):
 DJ PUMA – ALL BEFORE; Egzod, Lost Sky, Alaina Cross – Fight In Me; gabriawll,

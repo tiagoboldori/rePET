@@ -61,8 +61,10 @@ Toda a integração fica em `integrations/` e roda no worker
    Se nenhum se aplica, não há reencode.
 2. **Música de fundo** (`audio.py`) — decisão local (não vem da plataforma):
    sorteia uma faixa de `assets/music/`, usa o trecho inicial na duração
-   do clipe, com fade in/out. Sem faixas, é no-op. As câmeras não têm
-   áudio, então só entra a trilha.
+   do clipe, com fade in/out. Sem faixas, é no-op. O áudio da câmera
+   (som ambiente), quando o clipe tem, segue **por baixo** da música, em
+   `AMBIENT_VOLUME`. Se a câmera estiver sem áudio, ou a mixagem com ele
+   falhar, o clipe sai só com a música.
 
 O arquivo final fica em `Replay.arquivo_processado` e é o que vai para o FTP.
 
@@ -132,6 +134,14 @@ para **H.264** na própria câmera (o corte usa `-c copy`, sem reencode, e em
 HEVC o clipe final tem problema de reprodução). Validar com `ffprobe` no
 RTSP (`codec_name=h264`) — o software não valida isso.
 
+**Áudio da câmera (som ambiente).** O microfone precisa estar habilitado no
+stream principal: na câmera Hikvision, *Vídeo/Áudio → Tipo de stream = Vídeo e
+áudio* (ou, via ISAPI, `<Audio><enabled>true</enabled>` no
+`PUT /ISAPI/Streaming/channels/101`). Valide com `ffprobe` no RTSP: tem de
+aparecer uma stream `codec_type=audio` (AAC). Com ele, a live sai com o som da
+quadra e os clipes levam esse som por baixo da música. Sem ele nada quebra: a
+live sai com silêncio e os clipes só com a música.
+
 ## API
 
 Público (sem autenticação):
@@ -148,7 +158,7 @@ Público (sem autenticação):
 
 | Endpoint (header `X-Live-Key` = `LIVE_API_KEY`) | Descrição |
 |---|---|
-| `POST /live/{quadra_id}` | Inicia a live no YouTube (um `ffmpeg` RTSP→RTMP com `-c:v copy` e áudio mudo). Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; cai sozinha após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key |
+| `POST /live/{quadra_id}` | Inicia a live no YouTube (um `ffmpeg` RTSP→RTMP com `-c:v copy` e o áudio da câmera; se a câmera estiver sem áudio, entra silêncio). Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; cai sozinha após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key |
 | `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Encerra a live (o `POST` é para quem só consegue fazer POST) |
 
 Protegido por HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default —
@@ -195,7 +205,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `LARA_HEARTBEAT_INTERVAL_SECONDS` | `120` | Heartbeat |
 | `LARA_UPLOAD_POLL_INTERVAL_SECONDS` | `10` | Latência para detectar replay pendente (não é o ritmo de retry) |
 | `LOCAL_RAW_RETENTION_DAYS` | `3` | Retenção local dos clipes (só para a página de teste; a entrega oficial é da plataforma) |
-| `MUSIC_DIR` / `MUSIC_VOLUME` / `MUSIC_FADE_SECONDS` | `assets/music` / `0.5` / `1.5` | Música de fundo (ver `assets/music/README.md`) |
+| `MUSIC_DIR` / `MUSIC_VOLUME` / `MUSIC_FADE_SECONDS` | `assets/music` / `0.4` / `1.5` | Música de fundo (ver `assets/music/README.md`) |
+| `AMBIENT_VOLUME` | `0.4` | Som ambiente (áudio da câmera) por baixo da música; `0` = só a música |
 
 ## Estrutura
 
