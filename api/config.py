@@ -85,6 +85,19 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 
+# --- Live no YouTube (POST /live/{quadra_id}) ------------------------------
+# Chave única, enviada no header X-Live-Key, vale para todas as câmeras.
+# Sem default de propósito: vazia = o endpoint responde 503. A stream key de
+# cada quadra fica em `youtube_stream_key` no cameras.json.
+LIVE_API_KEY = os.environ.get("LIVE_API_KEY", "")
+YOUTUBE_RTMP_URL = os.environ.get("YOUTUBE_RTMP_URL", "rtmp://a.rtmp.youtube.com/live2")
+# Derruba a live sozinha depois desse tempo (0 = sem limite).
+LIVE_MAX_SECONDS = float(os.environ.get("LIVE_MAX_SECONDS", "7200"))
+LIVE_LOG_DIR = Path(
+    os.environ.get("LIVE_LOG_DIR", str(Path(__file__).resolve().parent.parent / "logs"))
+)
+
+
 def load_cameras() -> dict[str, dict]:
     """Carrega config/cameras.json, indexado por quadra_id."""
     if not CAMERAS_FILE.is_file():

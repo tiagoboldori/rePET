@@ -3,6 +3,9 @@
 POST /replay/{quadra_id} é chamado direto pelo firmware do botão físico
 (sem corpo; o quadra_id na URL basta).
 
+POST/DELETE /live/{quadra_id} liga/desliga a transmissão da câmera no
+YouTube; exigem o header X-Live-Key (LIVE_API_KEY).
+
 Dev: uvicorn api.main:app --reload --port 8000
 """
 import secrets
@@ -10,14 +13,14 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from api import config
+from api import config, live
 from clipper.clip_generator import (
     ClipGenerationError,
     generate_clip,
@@ -39,6 +42,7 @@ async def lifespan(app: FastAPI):
         if recuperados:
             print(f"[api] reconciliação: {recuperados} replay(s) recuperado(s) do disco.")
     yield
+    live.stop_all()
 
 
 app = FastAPI(title="Replay System — backend central", lifespan=lifespan)
@@ -70,6 +74,52 @@ def require_admin(credentials: HTTPBasicCredentials = Depends(_admin_security)) 
             ),
             headers={"WWW-Authenticate": "Basic"},
         )
+
+
+def require_live_key(x_live_key: str | None = Header(default=None)) -> None:
+    """Exige o header X-Live-Key; sem LIVE_API_KEY configurada, recusa tudo."""
+    if not config.LIVE_API_KEY:
+        raise HTTPException(status_code=503, detail="LIVE_API_KEY não configurada.")
+    if not x_live_key or not secrets.compare_digest(x_live_key, config.LIVE_API_KEY):
+        raise HTTPException(status_code=401, detail="Chave inválida.")
+
+
+def _live_camera(quadra_id: str) -> dict:
+    camera = config.load_cameras().get(quadra_id)
+    if camera is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"quadra_id '{quadra_id}' não está em {config.CAMERAS_FILE}.",
+        )
+    return camera
+
+
+@app.post("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
+def start_live(quadra_id: str):
+    """Inicia a transmissão da câmera no YouTube (idempotente)."""
+    camera = _live_camera(quadra_id)
+    stream_key = camera.get("youtube_stream_key")
+    if not stream_key:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{quadra_id}' não tem youtube_stream_key em {config.CAMERAS_FILE}.",
+        )
+    try:
+        started = live.start(quadra_id, camera["input_url"], stream_key)
+    except live.LiveError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "quadra_id": quadra_id,
+        "status": "iniciada" if started else "ja_no_ar",
+        "max_seconds": config.LIVE_MAX_SECONDS or None,
+    }
+
+
+@app.delete("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
+def stop_live(quadra_id: str):
+    """Encerra a transmissão da câmera."""
+    _live_camera(quadra_id)
+    return {"quadra_id": quadra_id, "status": "encerrada" if live.stop(quadra_id) else "nao_estava_no_ar"}
 
 
 def _serialize_replay(replay: Replay) -> dict:

@@ -16,17 +16,15 @@ com loop só como fallback se a faixa for mais curta que o clipe, mais
 fade in/out e volume fixo (`MUSIC_VOLUME`, `MUSIC_FADE_SECONDS` em
 `.env`/`api/config.py`). Ver `integrations/audio.py`.
 
-**Estado atual (2026-09-22):** duas faixas reais em uso — `clubix
-dingle.mp3` (162s) e `rePET dingle.mp3` (228s), ambas bem mais longas que
-qualquer clipe (~35s), então o sorteio hoje sempre pega os primeiros ~35s
-de uma das duas.
+**Estado atual (2026-10-16):** nove faixas do catálogo NCS (NoCopyrightSounds,
+<https://ncs.io>), todas com 2–4 min, bem mais longas que qualquer clipe (~35s):
+DJ PUMA – ALL BEFORE; Egzod, Lost Sky, Alaina Cross – Fight In Me; gabriawll,
+Ada Petcu – Desire; Zack Griffin – Feel It; Silver Bullet – NOBODY ELSE; Syn
+Cole, KAZHI – Waiting; jonty – fired up; e duas mais rock (gêneros Dance-Rock/
+Electronic Rock do NCS): Laeko – DON'T WANNA KNOW; SlidV, Clarx – Severed Rose. Substituíram os dois dingles antigos.
 
-Por padrão, arquivos de áudio novos **não são versionados** aqui (ver
-regra em `.gitignore`, `/assets/music/*`) — cada ambiente adiciona os
-seus localmente, evitando inflar um repositório público com mídia
-grande/com licenciamento a confirmar. As duas faixas acima são uma
-exceção deliberada: foram adicionadas direto pela interface web do
-GitHub (que não respeita `.gitignore` local) a pedido do responsável, e
-por isso ficam versionadas normalmente a partir de agora — só arquivos
-*novos* adicionados localmente continuam exigindo `git add -f` para
-entrar no repo.
+As faixas **não são versionadas** (regra `/assets/music/*` no `.gitignore`):
+cada ambiente baixa as suas em ncs.io (botão "Download" da página de cada
+faixa). A política do NCS exige crédito de artista/música na descrição do
+conteúdo publicado e restringe uso por marcas/serviços promovendo o próprio
+negócio — ver <https://ncs.io/usage-policy>.

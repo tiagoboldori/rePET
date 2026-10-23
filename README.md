@@ -146,6 +146,11 @@ Público (sem autenticação):
 | `GET /clips/<arquivo>.mp4` | Clipe bruto (StaticFiles sobre `OUTPUT_DIR`) |
 | `GET /health` | Healthcheck |
 
+| Endpoint (header `X-Live-Key` = `LIVE_API_KEY`) | Descrição |
+|---|---|
+| `POST /live/{quadra_id}` | Inicia a live no YouTube (um `ffmpeg` RTSP→RTMP com `-c:v copy` e áudio mudo). Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; cai sozinha após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key |
+| `DELETE /live/{quadra_id}` | Encerra a live |
+
 Protegido por HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default —
 sem configurar, responde `401` sempre):
 
@@ -173,6 +178,9 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `FTP_HOST` / `FTP_USER` / `FTP_PASSWORD` | — (obrigatórias p/ integração) | Servidor de arquivos do clube; sem eles o worker não sobe |
 | `FTP_PORT` / `FTP_BASE_DIR` / `FTP_TIMEOUT_SECONDS` | `21` / `Lara/Repet` / `60` | Porta, pasta do Lara no FTP e timeout |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Credencial do `DELETE`; vazio = sempre `401` |
+| `LIVE_API_KEY` | vazio | Chave do `/live/*` (header `X-Live-Key`); vazio = `503` |
+| `LIVE_MAX_SECONDS` | `7200` | Derruba a live sozinha; `0` = sem limite |
+| `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube |
 | `BUFFER_ROOT` | `/var/replay` | Segmentos brutos (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) |
 | `OUTPUT_DIR` | `/var/replay/output` | Clipes finais (`<quadra_id>_<timestamp>.mp4`, mais variantes `_oriented`/`_overlay`) |
 | `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras |
