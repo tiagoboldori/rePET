@@ -128,6 +128,22 @@ def probe_resolution(path: Path) -> tuple[int, int]:
     return int(width_str), int(height_str)
 
 
+def probe_has_audio(path: Path) -> bool:
+    """True se o arquivo tem trilha de áudio, via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            str(path),
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise ClipGenerationError(f"ffprobe falhou pra {path}:\n{result.stderr}")
+    return bool(result.stdout.strip())
+
+
 def generate_clip(
     quadra_id: str,
     buffer_root: Path,

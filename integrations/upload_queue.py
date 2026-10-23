@@ -40,8 +40,9 @@ def process_pending(
     ftp: FtpClient,
     output_dir: Path,
     music_dir: Path | None = None,
-    music_volume: float = 0.5,
+    music_volume: float = 0.4,
     music_fade_seconds: float = 1.5,
+    ambient_volume: float = 0.4,
 ) -> None:
     now = datetime.now()
     pendentes = session.exec(
@@ -55,7 +56,10 @@ def process_pending(
     ).all()
 
     for replay in pendentes:
-        _process_one(session, client, ftp, output_dir, replay, music_dir, music_volume, music_fade_seconds)
+        _process_one(
+            session, client, ftp, output_dir, replay,
+            music_dir, music_volume, music_fade_seconds, ambient_volume,
+        )
 
 
 def _process_one(
@@ -67,6 +71,7 @@ def _process_one(
     music_dir: Path | None,
     music_volume: float,
     music_fade_seconds: float,
+    ambient_volume: float,
 ) -> None:
     quadra = session.get(Quadra, replay.quadra_id)
     if quadra is None:
@@ -89,7 +94,9 @@ def _process_one(
             if send_path != clip_path:
                 replay.arquivo_processado = send_path.name
 
-            audio_path = apply_audio(send_path, music_dir, music_volume, music_fade_seconds)
+            audio_path = apply_audio(
+                send_path, music_dir, music_volume, music_fade_seconds, ambient_volume,
+            )
             if audio_path != send_path:
                 # apaga o intermediário sem música; só bruto/processado são rastreados
                 if send_path != clip_path:

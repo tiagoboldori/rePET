@@ -60,6 +60,7 @@ def main() -> None:
          lambda s: upload_queue.process_pending(
              s, client, ftp, config.OUTPUT_DIR,
              config.MUSIC_DIR, config.MUSIC_VOLUME, config.MUSIC_FADE_SECONDS,
+             config.AMBIENT_VOLUME,
          )),
         ("heartbeat", config.LARA_HEARTBEAT_INTERVAL_SECONDS,
          lambda s: heartbeat.send_all(s, client)),

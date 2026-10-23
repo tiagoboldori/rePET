@@ -532,9 +532,10 @@ def test_process_pending_chains_audio_after_render_and_cleans_intermediate(tmp_p
             rendered.write_bytes(b"rendered")
             return rendered
 
-        def _fake_audio(path, m_dir, volume, fade):
+        def _fake_audio(path, m_dir, volume, fade, ambient):
             assert path.name.endswith("_oriented_overlay.mp4")  # recebeu a saída do render
             assert m_dir == music_dir
+            assert (volume, fade, ambient) == (0.3, 1.0, 0.2)  # config chega até o apply_audio
             with_audio = path.with_name(f"{path.stem}_audio.mp4")
             with_audio.write_bytes(b"with audio")
             return with_audio
@@ -544,7 +545,7 @@ def test_process_pending_chains_audio_after_render_and_cleans_intermediate(tmp_p
 
         client = _FakeLaraClientForSync()
         ftp = _FakeFtp()
-        upload_queue.process_pending(session, client, ftp, output_dir, music_dir)
+        upload_queue.process_pending(session, client, ftp, output_dir, music_dir, 0.3, 1.0, 0.2)
 
         replay = session.get(Replay, "loc1-quadra1_20260917140000")
         assert replay.lara_status == ReplayLaraStatus.ENVIADO
@@ -803,6 +804,7 @@ def test_apply_audio_mixes_single_track_with_fade_and_volume(tmp_path, monkeypat
     track.write_bytes(b"fake mp3")
 
     monkeypatch.setattr("integrations.audio.probe_duration_seconds", lambda path: 35.0)
+    monkeypatch.setattr("integrations.audio.probe_has_audio", lambda path: False)
     calls = []
     monkeypatch.setattr("integrations.audio._run", lambda cmd: calls.append(cmd))
 
@@ -817,6 +819,7 @@ def test_apply_audio_mixes_single_track_with_fade_and_volume(tmp_path, monkeypat
     assert "afade=t=in:st=0:d=1.5" in filter_arg
     assert "afade=t=out:st=33.5:d=1.5" in filter_arg
     assert "volume=0.5" in filter_arg
+    assert "amix" not in filter_arg  # clipe sem áudio da câmera: só a música
     assert "-map" in cmd and "0:v" in cmd  # vídeo vem do clipe, não da música
     assert "-c:v" in cmd and "copy" in cmd  # nunca reencoda vídeo por causa de áudio
 
@@ -832,6 +835,7 @@ def test_apply_audio_picks_randomly_among_multiple_tracks(tmp_path, monkeypatch)
     track_b.write_bytes(b"b")
 
     monkeypatch.setattr("integrations.audio.probe_duration_seconds", lambda path: 35.0)
+    monkeypatch.setattr("integrations.audio.probe_has_audio", lambda path: False)
     monkeypatch.setattr("integrations.audio._run", lambda cmd: None)
     monkeypatch.setattr("integrations.audio.random.choice", lambda seq: track_b)
 
@@ -847,6 +851,7 @@ def test_apply_audio_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypatc
     (music_dir / "trilha.mp3").write_bytes(b"fake mp3")
 
     monkeypatch.setattr("integrations.audio.probe_duration_seconds", lambda path: 35.0)
+    monkeypatch.setattr("integrations.audio.probe_has_audio", lambda path: False)
 
     def _boom(cmd):
         raise AudioApplicationError("ffmpeg explodiu")
@@ -857,6 +862,105 @@ def test_apply_audio_raises_and_cleans_up_on_ffmpeg_failure(tmp_path, monkeypatc
         apply_audio(clip, music_dir)
 
     assert not (tmp_path / "loc1-quadra1_20260917140000_audio.mp4").exists()
+
+
+def _prepare_apply_audio(tmp_path, monkeypatch, *, has_audio: bool):
+    clip = tmp_path / "loc1-quadra1_20260917140000.mp4"
+    clip.write_bytes(b"fake")
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+    (music_dir / "trilha.mp3").write_bytes(b"fake mp3")
+    monkeypatch.setattr("integrations.audio.probe_duration_seconds", lambda path: 35.0)
+    monkeypatch.setattr("integrations.audio.probe_has_audio", lambda path: has_audio)
+    return clip, music_dir
+
+
+def _filter_of(cmd: list[str]) -> str:
+    return cmd[cmd.index("-filter_complex") + 1]
+
+
+def test_apply_audio_keeps_camera_audio_under_the_music(tmp_path, monkeypatch):
+    clip, music_dir = _prepare_apply_audio(tmp_path, monkeypatch, has_audio=True)
+    calls = []
+    monkeypatch.setattr("integrations.audio._run", lambda cmd: calls.append(cmd))
+
+    result = apply_audio(clip, music_dir, volume=0.4, fade_seconds=1.5, ambient_volume=0.3)
+
+    assert result.name == "loc1-quadra1_20260917140000_audio.mp4"
+    assert len(calls) == 1
+    filter_arg = _filter_of(calls[0])
+    assert "[0:a]" in filter_arg and "volume=0.3[ambient]" in filter_arg  # som da câmera, no volume próprio
+    assert "volume=0.4[music]" in filter_arg  # a música segue com o volume dela
+    assert "amix=inputs=2:duration=first:normalize=0[a]" in filter_arg  # normalize=0: não divide a música por 2
+    assert "-map" in calls[0] and "[a]" in calls[0]
+    assert "-c:v" in calls[0] and "copy" in calls[0]
+
+
+def test_apply_audio_skips_camera_audio_when_ambient_volume_is_zero(tmp_path, monkeypatch):
+    clip, music_dir = _prepare_apply_audio(tmp_path, monkeypatch, has_audio=True)
+    calls = []
+    monkeypatch.setattr("integrations.audio._run", lambda cmd: calls.append(cmd))
+
+    apply_audio(clip, music_dir, ambient_volume=0)
+
+    assert len(calls) == 1
+    assert "amix" not in _filter_of(calls[0])
+
+
+def test_apply_audio_only_music_when_clip_has_no_camera_audio(tmp_path, monkeypatch):
+    clip, music_dir = _prepare_apply_audio(tmp_path, monkeypatch, has_audio=False)
+    calls = []
+    monkeypatch.setattr("integrations.audio._run", lambda cmd: calls.append(cmd))
+
+    apply_audio(clip, music_dir)
+
+    assert len(calls) == 1
+    assert "[0:a]" not in _filter_of(calls[0])
+
+
+def test_apply_audio_falls_back_to_music_only_when_mixing_camera_audio_fails(tmp_path, monkeypatch, capsys):
+    clip, music_dir = _prepare_apply_audio(tmp_path, monkeypatch, has_audio=True)
+    calls = []
+
+    def _fail_first(cmd):
+        calls.append(cmd)
+        if len(calls) == 1:
+            raise AudioApplicationError("Comando falhou (ffmpeg ...):\nÁudio da câmera corrompido")
+
+    monkeypatch.setattr("integrations.audio._run", _fail_first)
+
+    result = apply_audio(clip, music_dir)
+
+    assert result.name == "loc1-quadra1_20260917140000_audio.mp4"
+    assert len(calls) == 2
+    assert "amix" in _filter_of(calls[0])
+    assert "amix" not in _filter_of(calls[1])  # 2ª tentativa: só a música
+    assert "Áudio da câmera corrompido" in capsys.readouterr().out  # motivo fica no log
+
+
+def test_apply_audio_raises_and_cleans_up_when_music_only_fallback_also_fails(tmp_path, monkeypatch):
+    clip, music_dir = _prepare_apply_audio(tmp_path, monkeypatch, has_audio=True)
+    calls = []
+
+    def _boom(cmd):
+        calls.append(cmd)
+        raise AudioApplicationError("ffmpeg explodiu")
+
+    monkeypatch.setattr("integrations.audio._run", _boom)
+
+    with pytest.raises(AudioApplicationError):
+        apply_audio(clip, music_dir)
+
+    assert len(calls) == 2
+    assert not (tmp_path / "loc1-quadra1_20260917140000_audio.mp4").exists()
+
+
+def test_apply_audio_keeps_clip_untouched_without_tracks_even_with_camera_audio(tmp_path, monkeypatch):
+    """Sem música não há o que mixar: o clipe segue com o som da câmera, sem reencode."""
+    clip, _ = _prepare_apply_audio(tmp_path, monkeypatch, has_audio=True)
+    monkeypatch.setattr("integrations.audio._run", lambda cmd: pytest.fail("não devia chamar o ffmpeg"))
+
+    assert apply_audio(clip, tmp_path / "no-such-dir") == clip
 
 
 # --- render ----------------------------------------------------------------

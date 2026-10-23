@@ -75,8 +75,11 @@ MUSIC_DIR = Path(
         str(Path(__file__).resolve().parent.parent / "assets" / "music"),
     )
 )
-MUSIC_VOLUME = float(os.environ.get("MUSIC_VOLUME", "0.5"))
+MUSIC_VOLUME = float(os.environ.get("MUSIC_VOLUME", "0.4"))
 MUSIC_FADE_SECONDS = float(os.environ.get("MUSIC_FADE_SECONDS", "1.5"))
+# Volume do som ambiente (áudio da câmera), mantido por baixo da música.
+# 0 = clipe só com a música.
+AMBIENT_VOLUME = float(os.environ.get("AMBIENT_VOLUME", "0.4"))
 
 # --- HTTP Basic dos endpoints de gerenciamento -----------------------------
 # Sem default de propósito: enquanto não configurado, esses endpoints
