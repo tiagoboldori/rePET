@@ -149,7 +149,7 @@ Público (sem autenticação):
 | Endpoint (header `X-Live-Key` = `LIVE_API_KEY`) | Descrição |
 |---|---|
 | `POST /live/{quadra_id}` | Inicia a live no YouTube (um `ffmpeg` RTSP→RTMP com `-c:v copy` e áudio mudo). Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; cai sozinha após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key |
-| `DELETE /live/{quadra_id}` | Encerra a live |
+| `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Encerra a live (o `POST` é para quem só consegue fazer POST) |
 
 Protegido por HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default —
 sem configurar, responde `401` sempre):

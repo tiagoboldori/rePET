@@ -115,6 +115,7 @@ def start_live(quadra_id: str):
     }
 
 
+@app.post("/live/{quadra_id}/stop", dependencies=[Depends(require_live_key)])
 @app.delete("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
 def stop_live(quadra_id: str):
     """Encerra a transmissão da câmera."""
