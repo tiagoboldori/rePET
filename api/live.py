@@ -1,181 +1,178 @@
-"""Transmissão ao vivo no YouTube: um ffmpeg por quadra, RTSP -> RTMP.
+"""Transmissão ao vivo no YouTube: a própria câmera empurra o RTMP.
 
-O vídeo da câmera é repassado sem reencode (`-c:v copy`) e o áudio dela
-(som ambiente) é recodificado em AAC. O YouTube exige trilha de áudio, então
-se a câmera estiver sem áudio entra uma trilha de silêncio no lugar. A
-stream key de cada quadra vem de `youtube_stream_key` em config/cameras.json.
+Nada passa pelo servidor: ligar a live é configurar a câmera (ISAPI Hikvision,
+`PUT /ISAPI/Custom/RTMP`) com a URL do YouTube + stream key da quadra
+(`youtube_stream_key` em config/cameras.json) e `enabled=true`; desligar é
+`enabled=false`. A câmera reconecta sozinha se o RTMP cair e a live sobrevive
+a reinício da API.
 
-Se o ffmpeg cair (câmera derrubou o RTSP, rede), um supervisor o relança
-até a live ser encerrada ou estourar LIVE_MAX_SECONDS.
+Pontos do firmware (DS-2CD1347G2H-LIU, V5.7.13):
+- as câmeras estão sem DNS, então a URL leva o IP do ingest (resolvido aqui);
+- a URL não pode ficar vazia (`Invalid XML Content`), então ao desligar vai um
+  placeholder, que também apaga a stream key da câmera;
+- o áudio vem do stream 101 (AAC mono 16 kHz); não há fallback para silêncio.
+
+O prazo (LIVE_MAX_SECONDS) é gravado em LIVE_STATE_FILE para ser reassumido
+quando a API sobe (`resume`); a câmera em si não tem timer.
 """
-import subprocess
+import json
+import socket
 import threading
 import time
-from datetime import datetime
-from pathlib import Path
+from urllib.parse import unquote, urlparse
+from xml.sax.saxutils import escape
+
+import requests
+from requests.auth import HTTPDigestAuth
 
 from api import config
 
 _lock = threading.Lock()
-_procs: dict[str, subprocess.Popen] = {}
 _timers: dict[str, threading.Timer] = {}
-_stops: dict[str, threading.Event] = {}
 
-RESTART_DELAY_SECONDS = 3
-# Quanto esperar para considerar que o ffmpeg subiu (falha imediata aparece em ~1s).
-STARTUP_CHECK_SECONDS = 1.5
-AUDIO_PROBE_TIMEOUT_SECONDS = 15
+ISAPI_TIMEOUT_SECONDS = 10
+OFF_URL = "rtmp://127.0.0.1/off"
+_RTMP_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<RTMP version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">'
+    "<enabled>{enabled}</enabled><URL>{url}</URL></RTMP>"
+)
 
 
 class LiveError(Exception):
-    """Falha ao iniciar a transmissão (mensagem segura para devolver na API)."""
+    """Falha ao falar com a câmera (mensagem segura para devolver na API)."""
 
 
-def _build_cmd(input_url: str, stream_key: str, camera_audio: bool) -> list[str]:
-    cmd = [
-        "ffmpeg", "-nostdin", "-loglevel", "warning",
-        # -timeout: sem dados da câmera por 10s o ffmpeg sai (e o supervisor relança).
-        "-rtsp_transport", "tcp", "-timeout", "10000000", "-i", input_url,
-    ]
-    if camera_audio:
-        # A câmera entrega AAC mono 16 kHz; o YouTube prefere estéreo 44,1 kHz.
-        cmd += [
-            "-map", "0:v:0", "-map", "0:a:0",
-            "-c:v", "copy", "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
-        ]
-    else:
-        cmd += [
-            "-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-            # O silêncio é infinito: sem -shortest o ffmpeg nunca sairia ao
-            # acabar o vídeo e ficaria preso, "no ar" mas sem transmitir.
-            "-shortest",
-        ]
-    return cmd + ["-f", "flv", f"{config.YOUTUBE_RTMP_URL.rstrip('/')}/{stream_key}"]
+def _camera_access(input_url: str) -> tuple[str, HTTPDigestAuth]:
+    """Host e credencial da câmera, tirados do RTSP (a mesma conta serve no ISAPI)."""
+    parsed = urlparse(input_url)
+    auth = HTTPDigestAuth(unquote(parsed.username or ""), unquote(parsed.password or ""))
+    return f"http://{parsed.hostname}", auth
 
 
-def _camera_has_audio(input_url: str) -> bool:
-    """False só quando o ffprobe confirma que o RTSP não traz trilha de áudio.
-
-    Falha do próprio ffprobe (câmera fora do ar, timeout) conta como "tem": nesse
-    caso o ffmpeg da live acusa o problema de conexão e o supervisor tenta de novo."""
+def _isapi(method: str, input_url: str, body: str | None = None) -> str:
+    base, auth = _camera_access(input_url)
     try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-rtsp_transport", "tcp", "-timeout", "10000000",
-                "-select_streams", "a", "-show_entries", "stream=index",
-                "-of", "csv=p=0", input_url,
-            ],
-            capture_output=True, text=True, timeout=AUDIO_PROBE_TIMEOUT_SECONDS,
+        resp = requests.request(
+            method, f"{base}/ISAPI/Custom/RTMP", auth=auth, timeout=ISAPI_TIMEOUT_SECONDS,
+            data=body.encode() if body else None, headers={"Content-Type": "application/xml"},
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return True
-    return result.returncode != 0 or bool(result.stdout.strip())
+    except requests.RequestException as exc:
+        # str(exc) pode trazer a URL; a mensagem só diz o tipo do erro.
+        raise LiveError(f"câmera não respondeu ({type(exc).__name__}).") from exc
+    if resp.status_code != 200 or (method == "PUT" and "<statusCode>1</statusCode>" not in resp.text):
+        raise LiveError(f"câmera recusou {method} /ISAPI/Custom/RTMP (HTTP {resp.status_code}).")
+    return resp.text
 
 
-def _alive(quadra_id: str) -> bool:
-    # "No ar" = há supervisor ativo; o ffmpeg pode estar no meio de um relançamento.
-    return quadra_id in _stops
+def _read(input_url: str) -> tuple[bool, str]:
+    """(enabled, URL) como a câmera tem agora."""
+    text = _isapi("GET", input_url)
+    enabled = "<enabled>true</enabled>" in text
+    url = text.split("<URL>", 1)[1].split("</URL>", 1)[0] if "<URL>" in text else ""
+    return enabled, url
 
 
-def is_live(quadra_id: str) -> bool:
-    with _lock:
-        return _alive(quadra_id)
+def _write(input_url: str, enabled: bool, url: str) -> None:
+    _isapi("PUT", input_url, _RTMP_XML.format(enabled=str(enabled).lower(), url=escape(url)))
 
 
-def _spawn(quadra_id: str, input_url: str, stream_key: str, camera_audio: bool) -> subprocess.Popen:
-    log_dir: Path = config.LIVE_LOG_DIR
-    log_dir.mkdir(parents=True, exist_ok=True)
-    # stderr do ffmpeg vai pra arquivo; o comando (com a key) nunca é logado.
-    with open(log_dir / f"live_{quadra_id}.log", "ab") as log:
-        # O ffmpeg não carimba o tempo: esta linha marca cada (re)lançamento e o áudio usado.
-        audio = "câmera" if camera_audio else "silêncio"
-        log.write(f"[live] {datetime.now():%Y-%m-%d %H:%M:%S} ffmpeg iniciado (áudio: {audio})\n".encode())
-        log.flush()
-        return subprocess.Popen(
-            _build_cmd(input_url, stream_key, camera_audio),
-            stdout=subprocess.DEVNULL, stderr=log, start_new_session=True,
-        )
+def _ingest_url(stream_key: str) -> str:
+    """URL do YouTube com o host trocado pelo IPv4 (a câmera não resolve DNS)."""
+    parsed = urlparse(config.YOUTUBE_RTMP_URL)
+    try:
+        ip = socket.getaddrinfo(parsed.hostname, None, socket.AF_INET)[0][4][0]
+    except OSError as exc:
+        raise LiveError(f"não consegui resolver {parsed.hostname}.") from exc
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"rtmp://{ip}{port}{parsed.path.rstrip('/')}/{stream_key}"
 
 
-def _supervise(quadra_id: str, input_url: str, stream_key: str, stop_event: threading.Event) -> None:
-    """Relança o ffmpeg quando ele cai, até a live ser encerrada."""
-    while True:
-        proc = _procs.get(quadra_id)
-        if proc is not None:
-            proc.wait()
-        if stop_event.wait(RESTART_DELAY_SECONDS):
-            return
-        # Reavalia o áudio a cada relançamento: a câmera pode ter ganhado ou perdido a trilha.
-        camera_audio = _camera_has_audio(input_url)
-        if stop_event.is_set():
-            return
-        try:
-            proc = _spawn(quadra_id, input_url, stream_key, camera_audio)
-        except OSError:
-            continue
-        with _lock:
-            if stop_event.is_set():
-                proc.terminate()
-                return
-            _procs[quadra_id] = proc
+# --- prazo (LIVE_MAX_SECONDS) persistido ------------------------------------
+
+def _load_deadlines() -> dict[str, float]:
+    try:
+        return json.loads(config.LIVE_STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_deadlines(deadlines: dict[str, float]) -> None:
+    config.LIVE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    config.LIVE_STATE_FILE.write_text(json.dumps(deadlines))
+
+
+def _arm(quadra_id: str, input_url: str, deadline: float) -> None:
+    timer = threading.Timer(max(deadline - time.time(), 0), _expire, args=(quadra_id, input_url))
+    timer.daemon = True
+    timer.start()
+    _timers[quadra_id] = timer
+
+
+def _expire(quadra_id: str, input_url: str) -> None:
+    print(f"[live] {quadra_id}: LIVE_MAX_SECONDS atingido, encerrando.")
+    try:
+        stop(quadra_id, input_url)
+    except LiveError as exc:
+        print(f"[live] {quadra_id}: falha ao encerrar no prazo: {exc}")
+
+
+def _forget(quadra_id: str) -> None:
+    timer = _timers.pop(quadra_id, None)
+    if timer is not None:
+        timer.cancel()
+    deadlines = _load_deadlines()
+    if deadlines.pop(quadra_id, None) is not None:
+        _save_deadlines(deadlines)
+
+
+# --- API pública -------------------------------------------------------------
+
+def status(input_url: str) -> bool:
+    """True se a câmera está configurada para empurrar o RTMP."""
+    return _read(input_url)[0]
 
 
 def start(quadra_id: str, input_url: str, stream_key: str) -> bool:
-    """Inicia a live. Retorna False se já estava no ar (idempotente)."""
+    """Liga a live. Retorna False se já estava no ar com essa stream key (idempotente)."""
+    url = _ingest_url(stream_key)
     with _lock:
-        if _alive(quadra_id):
+        enabled, current = _read(input_url)
+        if enabled and current == url:
             return False
-
-        camera_audio = _camera_has_audio(input_url)
-        proc = _spawn(quadra_id, input_url, stream_key, camera_audio)
-
-        time.sleep(STARTUP_CHECK_SECONDS)
-        if proc.poll() is not None and camera_audio:
-            # Algo no áudio da câmera derrubou o ffmpeg: tenta de novo com silêncio.
-            proc = _spawn(quadra_id, input_url, stream_key, camera_audio=False)
-            time.sleep(STARTUP_CHECK_SECONDS)
-        if proc.poll() is not None:
-            raise LiveError(
-                f"ffmpeg encerrou ao iniciar (código {proc.returncode}); "
-                f"veja {config.LIVE_LOG_DIR / f'live_{quadra_id}.log'}."
-            )
-
-        _procs[quadra_id] = proc
-        stop_event = threading.Event()
-        _stops[quadra_id] = stop_event
-        threading.Thread(
-            target=_supervise, args=(quadra_id, input_url, stream_key, stop_event), daemon=True,
-        ).start()
+        _write(input_url, True, url)
+        if not _read(input_url)[0]:
+            raise LiveError("a câmera aceitou o PUT mas não ficou com a live ligada.")
+        _forget(quadra_id)
         if config.LIVE_MAX_SECONDS > 0:
-            timer = threading.Timer(config.LIVE_MAX_SECONDS, stop, args=(quadra_id,))
-            timer.daemon = True
-            timer.start()
-            _timers[quadra_id] = timer
+            deadline = time.time() + config.LIVE_MAX_SECONDS
+            _save_deadlines({**_load_deadlines(), quadra_id: deadline})
+            _arm(quadra_id, input_url, deadline)
         return True
 
 
-def stop(quadra_id: str) -> bool:
-    """Encerra a live. Retorna False se não havia nenhuma no ar."""
+def stop(quadra_id: str, input_url: str) -> bool:
+    """Desliga a live. Retorna False se a câmera já estava com a live desligada."""
     with _lock:
-        stop_event = _stops.pop(quadra_id, None)
-        if stop_event is not None:
-            stop_event.set()
-        timer = _timers.pop(quadra_id, None)
-        if timer is not None:
+        enabled, _ = _read(input_url)
+        if enabled:
+            _write(input_url, False, OFF_URL)
+        _forget(quadra_id)
+        return enabled
+
+
+def resume(cameras: dict[str, dict]) -> None:
+    """Na subida da API: reassume os prazos gravados (os vencidos desligam já)."""
+    with _lock:
+        for quadra_id, deadline in _load_deadlines().items():
+            camera = cameras.get(quadra_id)
+            if camera is not None:
+                _arm(quadra_id, camera["input_url"], deadline)
+
+
+def cancel_timers() -> None:
+    """No desligamento da API: só para os timers; a live continua na câmera."""
+    with _lock:
+        for timer in _timers.values():
             timer.cancel()
-        proc = _procs.pop(quadra_id, None)
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    return stop_event is not None
-
-
-def stop_all() -> None:
-    for quadra_id in list(_stops):
-        stop(quadra_id)
+        _timers.clear()

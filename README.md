@@ -139,10 +139,13 @@ stream principal: na câmera Hikvision, *Vídeo/Áudio → Tipo de stream = Víd
 áudio* (ou, via ISAPI, `<Audio><enabled>true</enabled>` no
 `PUT /ISAPI/Streaming/channels/101`). Valide com `ffprobe` no RTSP: tem de
 aparecer uma stream `codec_type=audio` (AAC). Com ele, a live sai com o som da
-quadra e os clipes levam esse som por baixo da música. Sem ele nada quebra: a
-live sai com silêncio e os clipes só com a música.
+quadra e os clipes levam esse som por baixo da música. Sem ele os clipes saem
+só com a música; a live, como é a câmera quem transmite, fica sem trilha de
+áudio (o YouTube pode reclamar).
 
 ## API
+
+Referência completa de rotas, com exemplos de `curl` (gravar replay, subir/desligar a live, consultar e apagar replays): [`docs/API.md`](docs/API.md).
 
 Público (sem autenticação):
 
@@ -158,8 +161,17 @@ Público (sem autenticação):
 
 | Endpoint (header `X-Live-Key` = `LIVE_API_KEY`) | Descrição |
 |---|---|
-| `POST /live/{quadra_id}` | Inicia a live no YouTube (um `ffmpeg` RTSP→RTMP com `-c:v copy` e o áudio da câmera; se a câmera estiver sem áudio, entra silêncio). Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; cai sozinha após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key |
-| `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Encerra a live (o `POST` é para quem só consegue fazer POST) |
+| `GET /live/{quadra_id}` | `{no_ar: bool}`, lido direto da câmera (`enabled` do `/ISAPI/Custom/RTMP`). `502` se a câmera não responde |
+| `POST /live/{quadra_id}` | Liga a live: configura a **câmera** (ISAPI) para empurrar o RTMP direto ao YouTube, sem passar pelo servidor. Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; a API desliga a câmera após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key, `502` câmera/DNS com problema |
+| `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Desliga a live (o `POST` é para quem só consegue fazer POST) |
+
+A live é da câmera (Hikvision, vídeo 1080p H.264 do stream principal + áudio AAC
+mono 16 kHz): sobrevive a reinício da API, a câmera reconecta sozinha se o RTMP
+cair, e o prazo fica em `LIVE_STATE_FILE` para ser reassumido na subida. As
+câmeras estão **sem DNS**, então a URL leva o IP do ingest (resolvido pela API
+a cada `POST`); ao desligar, a URL é trocada por um placeholder, o que também
+apaga a stream key da câmera. Sem overlay: placar ou qualquer arte por cima
+exige voltar a passar o vídeo por um ffmpeg no servidor.
 
 Protegido por HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default —
 sem configurar, responde `401` sempre):
@@ -189,7 +201,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `FTP_PORT` / `FTP_BASE_DIR` / `FTP_TIMEOUT_SECONDS` | `21` / `Lara/Repet` / `60` | Porta, pasta do Lara no FTP e timeout |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Credencial do `DELETE`; vazio = sempre `401` |
 | `LIVE_API_KEY` | vazio | Chave do `/live/*` (header `X-Live-Key`); vazio = `503` |
-| `LIVE_MAX_SECONDS` | `7200` | Derruba a live sozinha; `0` = sem limite |
+| `LIVE_MAX_SECONDS` | `7200` | Desliga a live na câmera depois desse tempo; `0` = sem limite |
+| `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
 | `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube |
 | `BUFFER_ROOT` | `/var/replay` | Segmentos brutos (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) |
 | `OUTPUT_DIR` | `/var/replay/output` | Clipes finais (`<quadra_id>_<timestamp>.mp4`, mais variantes `_oriented`/`_overlay`) |

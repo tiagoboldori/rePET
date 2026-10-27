@@ -3,8 +3,8 @@
 POST /replay/{quadra_id} é chamado direto pelo firmware do botão físico
 (sem corpo; o quadra_id na URL basta).
 
-POST/DELETE /live/{quadra_id} liga/desliga a transmissão da câmera no
-YouTube; exigem o header X-Live-Key (LIVE_API_KEY).
+POST/DELETE /live/{quadra_id} liga/desliga o RTMP que a própria câmera
+empurra para o YouTube (via ISAPI); GET /live/{quadra_id} diz se está no ar. Exigem o header X-Live-Key (LIVE_API_KEY).
 
 Dev: uvicorn api.main:app --reload --port 8000
 """
@@ -41,8 +41,9 @@ async def lifespan(app: FastAPI):
         recuperados = reconcile_replays(session, config.OUTPUT_DIR)
         if recuperados:
             print(f"[api] reconciliação: {recuperados} replay(s) recuperado(s) do disco.")
+    live.resume(config.load_cameras())
     yield
-    live.stop_all()
+    live.cancel_timers()
 
 
 app = FastAPI(title="Replay System — backend central", lifespan=lifespan)
@@ -94,9 +95,19 @@ def _live_camera(quadra_id: str) -> dict:
     return camera
 
 
+@app.get("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
+def live_status(quadra_id: str):
+    """Diz se a câmera está empurrando a live (lê o estado direto da câmera)."""
+    camera = _live_camera(quadra_id)
+    try:
+        return {"quadra_id": quadra_id, "no_ar": live.status(camera["input_url"])}
+    except live.LiveError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
 def start_live(quadra_id: str):
-    """Inicia a transmissão da câmera no YouTube (idempotente)."""
+    """Liga o RTMP da câmera para o YouTube (idempotente)."""
     camera = _live_camera(quadra_id)
     stream_key = camera.get("youtube_stream_key")
     if not stream_key:
@@ -118,9 +129,13 @@ def start_live(quadra_id: str):
 @app.post("/live/{quadra_id}/stop", dependencies=[Depends(require_live_key)])
 @app.delete("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
 def stop_live(quadra_id: str):
-    """Encerra a transmissão da câmera."""
-    _live_camera(quadra_id)
-    return {"quadra_id": quadra_id, "status": "encerrada" if live.stop(quadra_id) else "nao_estava_no_ar"}
+    """Desliga o RTMP da câmera."""
+    camera = _live_camera(quadra_id)
+    try:
+        stopped = live.stop(quadra_id, camera["input_url"])
+    except live.LiveError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"quadra_id": quadra_id, "status": "encerrada" if stopped else "nao_estava_no_ar"}
 
 
 def _serialize_replay(replay: Replay) -> dict:

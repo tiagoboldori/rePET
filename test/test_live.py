@@ -1,294 +1,182 @@
-"""Testes da live no YouTube: comando do ffmpeg, escolha do áudio e fallback para silêncio.
+"""Testes da live no YouTube: a câmera (ISAPI) é quem empurra o RTMP.
 
-Sem ffmpeg nem câmera: `_spawn` e o ffprobe (`subprocess.run`) são substituídos por fakes.
+Sem câmera nem rede: `requests.request` é trocado por uma câmera falsa que guarda
+o estado de /ISAPI/Custom/RTMP, e a resolução de DNS por um IP fixo.
 """
 from __future__ import annotations
 
-import subprocess
-import threading
+import re
 import time
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from api import config, live
 
-URL = "rtsp://user:senha@10.0.0.1:554/stream1"
+URL = "rtsp://user:p%40ss@10.0.0.1:554/stream1"
+KEY = "abcd-1234-efgh-5678-ijkl"
+INGEST = f"rtmp://203.0.113.9/live2/{KEY}"
+
+
+class _FakeCamera:
+    def __init__(self):
+        self.enabled = False
+        self.url = ""
+        self.calls: list[tuple[str, str | None]] = []
+        self.auth = None
+        self.put_status = "<statusCode>1</statusCode>"
+        self.error: Exception | None = None
+
+    def request(self, method, url, auth=None, timeout=None, data=None, headers=None):
+        if self.error is not None:
+            raise self.error
+        assert url == "http://10.0.0.1/ISAPI/Custom/RTMP"
+        self.auth = (auth.username, auth.password)
+        body = data.decode() if data else None
+        self.calls.append((method, body))
+        if method == "PUT":
+            if "<URL></URL>" in body:  # o firmware real recusa URL vazia
+                return SimpleNamespace(status_code=200, text="<statusCode>4</statusCode>")
+            self.enabled = "<enabled>true</enabled>" in body
+            self.url = re.search(r"<URL>(.*)</URL>", body).group(1)
+            return SimpleNamespace(status_code=200, text=self.put_status)
+        return SimpleNamespace(
+            status_code=200,
+            text=f"<RTMP><enabled>{str(self.enabled).lower()}</enabled><URL>{self.url}</URL></RTMP>",
+        )
 
+    @property
+    def puts(self):
+        return [b for m, b in self.calls if m == "PUT"]
 
-class _FakeProc:
-    """Processo que só termina quando o teste manda (ou quando o stop o termina)."""
 
-    def __init__(self, alive: bool = True):
-        self.returncode = None if alive else 1
-        self._exited = threading.Event()
-        if not alive:
-            self._exited.set()
+@pytest.fixture
+def camera(monkeypatch, tmp_path):
+    cam = _FakeCamera()
+    monkeypatch.setattr(live.requests, "request", cam.request)
+    monkeypatch.setattr(live.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("203.0.113.9", 0))])
+    monkeypatch.setattr(config, "YOUTUBE_RTMP_URL", "rtmp://a.rtmp.youtube.com/live2")
+    monkeypatch.setattr(config, "LIVE_MAX_SECONDS", 7200.0)
+    monkeypatch.setattr(config, "LIVE_STATE_FILE", tmp_path / "live_state.json")
+    yield cam
+    live.cancel_timers()
 
-    def poll(self):
-        return self.returncode
 
-    def wait(self, timeout=None):
-        if not self._exited.wait(timeout):
-            raise subprocess.TimeoutExpired("ffmpeg", timeout)
-        return self.returncode
+def test_start_turns_on_the_camera_with_the_ingest_ip_and_the_key(camera):
+    assert live.start("q1", URL, KEY) is True
+    assert camera.enabled and camera.url == INGEST
+    assert camera.auth == ("user", "p@ss")  # credencial do RTSP, já decodificada
+
 
-    def die(self, code: int = 1):
-        self.returncode = code
-        self._exited.set()
+def test_start_is_idempotent(camera):
+    live.start("q1", URL, KEY)
+    assert live.start("q1", URL, KEY) is False
+    assert len(camera.puts) == 1
+
+
+def test_start_with_another_key_reconfigures_the_camera(camera):
+    live.start("q1", URL, KEY)
+    assert live.start("q1", URL, "outra-key") is True
+    assert camera.url.endswith("/outra-key")
+
+
+def test_ingest_keeps_port_and_path_of_the_configured_url(camera, monkeypatch):
+    monkeypatch.setattr(config, "YOUTUBE_RTMP_URL", "rtmp://ingest.exemplo:1936/app/")
+    live.start("q1", URL, KEY)
+    assert camera.url == f"rtmp://203.0.113.9:1936/app/{KEY}"
+
+
+def test_stop_turns_off_and_wipes_the_key_from_the_camera(camera):
+    live.start("q1", URL, KEY)
+    assert live.stop("q1", URL) is True
+    assert not camera.enabled
+    assert KEY not in camera.url and camera.url  # URL nunca vazia: o firmware recusa
+
+
+def test_stop_when_already_off_does_not_write(camera):
+    assert live.stop("q1", URL) is False
+    assert camera.puts == []
+
+
+def test_status_reads_the_camera(camera):
+    assert live.status(URL) is False
+    live.start("q1", URL, KEY)
+    assert live.status(URL) is True
+
+
+def test_start_fails_when_the_camera_does_not_keep_it_on(camera):
+    camera.put_status = "<statusCode>1</statusCode>"
+    original = camera.request
+
+    def _ignores_enable(method, url, **kw):
+        if method == "PUT":
+            camera.calls.append((method, kw["data"].decode()))
+            return SimpleNamespace(status_code=200, text=camera.put_status)
+        return original(method, url, **kw)
+
+    live.requests.request = _ignores_enable
+    with pytest.raises(live.LiveError, match="não ficou com a live ligada"):
+        live.start("q1", URL, KEY)
 
-    def terminate(self):
-        self.die(-15)
 
-    def kill(self):
-        self.die(-9)
+def test_camera_unreachable_raises_live_error_without_leaking_the_url(camera):
+    camera.error = requests.ConnectTimeout("http://user:p%40ss@10.0.0.1 timeout")
+    with pytest.raises(live.LiveError) as exc:
+        live.start("q1", URL, KEY)
+    assert "p%40ss" not in str(exc.value) and "ConnectTimeout" in str(exc.value)
 
 
-def _fake_spawn(monkeypatch, first=()):
-    """Troca o `_spawn` por um que registra o `camera_audio` de cada lançamento.
+def test_camera_rejecting_the_put_raises_live_error(camera):
+    camera.put_status = "<statusCode>4</statusCode>"
+    with pytest.raises(live.LiveError, match="recusou PUT"):
+        live.start("q1", URL, KEY)
 
-    `first` são os processos devolvidos nos primeiros lançamentos; depois, um vivo novo."""
-    spawned: list[bool] = []
-    created: list[_FakeProc] = []
-    queue = list(first)
 
-    def _spawn(quadra_id, input_url, stream_key, camera_audio):
-        spawned.append(camera_audio)
-        proc = queue.pop(0) if queue else _FakeProc()
-        created.append(proc)
-        return proc
+def test_dns_failure_raises_live_error_before_touching_the_camera(camera, monkeypatch):
+    def _fail(*a, **k):
+        raise OSError("sem DNS")
 
-    monkeypatch.setattr(live, "_spawn", _spawn)
-    return spawned, created
+    monkeypatch.setattr(live.socket, "getaddrinfo", _fail)
+    with pytest.raises(live.LiveError, match="resolver"):
+        live.start("q1", URL, KEY)
+    assert camera.calls == []
 
 
-def _wait_until(condition, timeout: float = 2.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if condition():
-            return True
-        time.sleep(0.01)
-    return False
+def test_start_saves_the_deadline_and_stop_forgets_it(camera):
+    live.start("q1", URL, KEY)
+    assert live._load_deadlines()["q1"] == pytest.approx(time.time() + 7200, abs=5)
+    live.stop("q1", URL)
+    assert live._load_deadlines() == {}
 
 
-@pytest.fixture(autouse=True)
-def _live_defaults(monkeypatch):
-    monkeypatch.setattr(config, "LIVE_MAX_SECONDS", 0)
-    monkeypatch.setattr(live, "STARTUP_CHECK_SECONDS", 0)
-    monkeypatch.setattr(live, "RESTART_DELAY_SECONDS", 0.01)
-    yield
-    live.stop_all()
+def test_no_deadline_when_max_seconds_is_zero(camera, monkeypatch):
+    monkeypatch.setattr(config, "LIVE_MAX_SECONDS", 0.0)
+    live.start("q1", URL, KEY)
+    assert live._load_deadlines() == {} and live._timers == {}
 
 
-# --- comando do ffmpeg -------------------------------------------------------
+def test_resume_turns_off_a_live_whose_deadline_passed_while_the_api_was_down(camera):
+    live.start("q1", URL, KEY)
+    live._save_deadlines({"q1": time.time() - 1})
+    live.cancel_timers()  # simula o reinício da API: o timer em memória some
+    live.resume({"q1": {"input_url": URL}})
+    for _ in range(50):
+        if not camera.enabled:
+            break
+        time.sleep(0.05)
+    assert not camera.enabled and live._load_deadlines() == {}
 
 
-def test_build_cmd_with_camera_audio_reencodes_only_the_audio(monkeypatch):
-    monkeypatch.setattr(config, "YOUTUBE_RTMP_URL", "rtmp://yt.example/live2/")
+def test_resume_rearms_a_future_deadline_without_touching_the_camera(camera):
+    live.start("q1", URL, KEY)
+    puts_before = len(camera.puts)
+    live.cancel_timers()
+    live.resume({"q1": {"input_url": URL}})
+    assert "q1" in live._timers and camera.enabled and len(camera.puts) == puts_before
 
-    cmd = live._build_cmd(URL, "abc-key", camera_audio=True)
 
-    joined = " ".join(cmd)
-    assert cmd[-3:] == ["-f", "flv", "rtmp://yt.example/live2/abc-key"]
-    assert "-map 0:v:0 -map 0:a:0" in joined  # vídeo e áudio vêm da câmera
-    assert "-c:v copy" in joined  # nunca reencoda o vídeo
-    assert "-c:a aac -ar 44100 -ac 2" in joined  # câmera é AAC mono 16 kHz; YouTube prefere estéreo 44,1 kHz
-    assert "anullsrc" not in joined
-    assert "-shortest" not in cmd  # sem silêncio infinito, o ffmpeg sai sozinho quando o RTSP cai
-
-
-def test_build_cmd_without_camera_audio_adds_silence(monkeypatch):
-    monkeypatch.setattr(config, "YOUTUBE_RTMP_URL", "rtmp://yt.example/live2")
-
-    cmd = live._build_cmd(URL, "abc-key", camera_audio=False)
-
-    joined = " ".join(cmd)
-    assert cmd[-3:] == ["-f", "flv", "rtmp://yt.example/live2/abc-key"]
-    assert "anullsrc=channel_layout=stereo:sample_rate=44100" in joined
-    assert "-map 0:v:0 -map 1:a:0" in joined  # áudio vem do silêncio, não da câmera
-    assert "0:a:0" not in joined
-    assert "-c:v copy" in joined
-    assert "-shortest" in cmd  # o silêncio é infinito; sem isso o ffmpeg ficaria preso
-
-
-# --- ffprobe do áudio da câmera ----------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "returncode, stdout, expected",
-    [
-        (0, "1\n", True),  # há trilha de áudio
-        (0, "", False),  # ffprobe respondeu e não há trilha: o único caso de "sem áudio"
-        (1, "", True),  # ffprobe falhou (câmera fora do ar): não conclui nada
-    ],
-)
-def test_camera_has_audio_reads_the_ffprobe_answer(monkeypatch, returncode, stdout, expected):
-    monkeypatch.setattr(
-        live.subprocess, "run",
-        lambda cmd, **kwargs: SimpleNamespace(returncode=returncode, stdout=stdout),
-    )
-
-    assert live._camera_has_audio(URL) is expected
-
-
-@pytest.mark.parametrize(
-    "error", [subprocess.TimeoutExpired("ffprobe", 15), FileNotFoundError("ffprobe")],
-)
-def test_camera_has_audio_assumes_audio_when_ffprobe_cannot_answer(monkeypatch, error):
-    def _raise(cmd, **kwargs):
-        raise error
-
-    monkeypatch.setattr(live.subprocess, "run", _raise)
-
-    assert live._camera_has_audio(URL) is True
-
-
-# --- _spawn ------------------------------------------------------------------
-
-
-def test_spawn_logs_which_audio_is_used_but_never_the_stream_key(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "LIVE_LOG_DIR", tmp_path)
-    popen_cmds = []
-
-    def _popen(cmd, **kwargs):
-        popen_cmds.append(cmd)
-        return _FakeProc()
-
-    monkeypatch.setattr(live.subprocess, "Popen", _popen)
-
-    live._spawn("q1", URL, "segredo-key", camera_audio=True)
-    live._spawn("q1", URL, "segredo-key", camera_audio=False)
-
-    log = (tmp_path / "live_q1.log").read_text()
-    assert "ffmpeg iniciado (áudio: câmera)" in log
-    assert "ffmpeg iniciado (áudio: silêncio)" in log
-    assert "segredo-key" not in log
-    assert popen_cmds == [
-        live._build_cmd(URL, "segredo-key", True),
-        live._build_cmd(URL, "segredo-key", False),
-    ]
-
-
-# --- start: escolha do áudio e fallback --------------------------------------
-
-
-def test_start_uses_the_camera_audio(monkeypatch):
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: True)
-    spawned, _ = _fake_spawn(monkeypatch)
-
-    assert live.start("q1", URL, "key") is True
-
-    assert spawned == [True]
-    assert live.is_live("q1")
-
-
-def test_start_is_idempotent_and_does_not_probe_again(monkeypatch):
-    probes = []
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: probes.append(url) or True)
-    spawned, _ = _fake_spawn(monkeypatch)
-
-    assert live.start("q1", URL, "key") is True
-    assert live.start("q1", URL, "key") is False
-
-    assert spawned == [True]
-    assert len(probes) == 1
-
-
-def test_start_falls_back_to_silence_when_the_camera_has_no_audio(monkeypatch):
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: False)
-    spawned, _ = _fake_spawn(monkeypatch)
-
-    assert live.start("q1", URL, "key") is True
-
-    assert spawned == [False]
-
-
-def test_start_retries_with_silence_when_ffmpeg_with_camera_audio_dies_on_startup(monkeypatch):
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: True)
-    spawned, _ = _fake_spawn(monkeypatch, first=[_FakeProc(alive=False)])
-
-    assert live.start("q1", URL, "key") is True
-
-    assert spawned == [True, False]
-    assert live.is_live("q1")
-
-
-def test_start_fails_when_ffmpeg_dies_even_with_silence(monkeypatch):
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: True)
-    spawned, _ = _fake_spawn(monkeypatch, first=[_FakeProc(alive=False), _FakeProc(alive=False)])
-
-    with pytest.raises(live.LiveError, match="ffmpeg encerrou ao iniciar"):
-        live.start("q1", URL, "key")
-
-    assert spawned == [True, False]
-    assert not live.is_live("q1")
-
-
-def test_start_does_not_retry_when_ffmpeg_with_silence_dies(monkeypatch):
-    """Já estava em silêncio: tentar de novo com silêncio só repetiria o mesmo erro."""
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: False)
-    spawned, _ = _fake_spawn(monkeypatch, first=[_FakeProc(alive=False)])
-
-    with pytest.raises(live.LiveError):
-        live.start("q1", URL, "key")
-
-    assert spawned == [False]
-    assert not live.is_live("q1")
-
-
-# --- supervisor ---------------------------------------------------------------
-
-
-def test_relaunch_checks_the_camera_audio_again(monkeypatch):
-    has_audio = [True]
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: has_audio[0])
-    spawned, created = _fake_spawn(monkeypatch)
-    live.start("q1", URL, "key")
-    assert spawned == [True]
-
-    has_audio[0] = False  # a câmera perdeu a trilha de áudio...
-    created[0].die()  # ...e o ffmpeg caiu junto com o RTSP
-
-    assert _wait_until(lambda: len(spawned) == 2)
-    assert spawned == [True, False]
-    assert live.is_live("q1")
-
-
-def test_relaunch_goes_back_to_camera_audio_when_it_returns(monkeypatch):
-    has_audio = [False]
-    monkeypatch.setattr(live, "_camera_has_audio", lambda url: has_audio[0])
-    spawned, created = _fake_spawn(monkeypatch)
-    live.start("q1", URL, "key")
-    assert spawned == [False]
-
-    has_audio[0] = True
-    created[0].die()
-
-    assert _wait_until(lambda: len(spawned) == 2)
-    assert spawned == [False, True]
-
-
-def test_stop_during_relaunch_does_not_spawn_again(monkeypatch):
-    probing = threading.Event()
-    release = threading.Event()
-    answers = iter([True])
-
-    def _probe(url):
-        try:
-            return next(answers)
-        except StopIteration:
-            probing.set()  # 2º probe = o do relançamento
-            release.wait(2)
-            return True
-
-    monkeypatch.setattr(live, "_camera_has_audio", _probe)
-    spawned, created = _fake_spawn(monkeypatch)
-    live.start("q1", URL, "key")
-
-    created[0].die()
-    assert probing.wait(2)  # supervisor está no ffprobe do relançamento
-    assert live.stop("q1") is True
-    release.set()
-
-    time.sleep(0.1)
-    assert spawned == [True]  # o relançamento foi abortado antes do _spawn
+def test_cancel_timers_does_not_turn_off_the_camera(camera):
+    live.start("q1", URL, KEY)
+    live.cancel_timers()
+    assert camera.enabled and live._timers == {}

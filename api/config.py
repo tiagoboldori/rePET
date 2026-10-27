@@ -94,10 +94,11 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 # cada quadra fica em `youtube_stream_key` no cameras.json.
 LIVE_API_KEY = os.environ.get("LIVE_API_KEY", "")
 YOUTUBE_RTMP_URL = os.environ.get("YOUTUBE_RTMP_URL", "rtmp://a.rtmp.youtube.com/live2")
-# Derruba a live sozinha depois desse tempo (0 = sem limite).
+# Desliga a live na câmera depois desse tempo (0 = sem limite); o prazo é gravado
+# em LIVE_STATE_FILE para sobreviver a reinício da API.
 LIVE_MAX_SECONDS = float(os.environ.get("LIVE_MAX_SECONDS", "7200"))
-LIVE_LOG_DIR = Path(
-    os.environ.get("LIVE_LOG_DIR", str(Path(__file__).resolve().parent.parent / "logs"))
+LIVE_STATE_FILE = Path(
+    os.environ.get("LIVE_STATE_FILE", str(Path(__file__).resolve().parent.parent / ".data" / "live_state.json"))
 )
 
 
