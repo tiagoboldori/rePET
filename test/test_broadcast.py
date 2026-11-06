@@ -438,3 +438,39 @@ def test_log_grande_e_rotacionado_na_largada(bc, monkeypatch):
     log.write_text("x" * 500)
     broadcast.start("q1", CAMERA)
     assert log.with_suffix(".log.1").read_text() == "x" * 500
+
+
+def test_a_caixa_do_placar_fica_embaixo_junto_do_texto_e_nao_no_topo(bc):
+    """Renderiza um quadro 1920x1080 branco com a cadeia de vídeo de verdade e mede os pixels.
+
+    Pegou um defeito real: no drawbox `h` é a altura da caixa, então `y=h-228` jogava a caixa
+    para o topo enquanto o texto (drawtext, onde `h` é a do vídeo) ficava embaixo.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("precisa de ffmpeg")
+    broadcast._write_overlay("q1")
+    chain = ",".join(broadcast._video_filters("q1"))
+    raw = subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=1920x1080:d=1",
+         "-vf", chain + ",format=gray", "-frames:v", "1", "-f", "rawvideo", "-"],
+        capture_output=True, check=True,
+    ).stdout
+    width, height = 1920, 1080
+
+    def mean(x0, y0, x1, y1):
+        total = count = 0
+        for y in range(y0, y1, 4):
+            row = raw[y * width + x0: y * width + x1: 4]
+            total += sum(row)
+            count += len(row)
+        return total / count
+
+    box_bottom = mean(60, height - 215, 480, height - 60)   # onde a caixa deve estar (com texto branco por cima: ainda < branco puro)
+    box_edge = mean(52, height - 224, 70, height - 52)      # faixa à esquerda do texto: só a caixa escura
+    top_left = mean(52, 0, 740, 180)                         # onde o defeito a punha: tem que seguir branco
+    assert top_left > 250, f"há uma caixa no topo (média {top_left:.0f}); o fundo era branco"
+    assert box_edge < 140, f"não há caixa escura embaixo (média {box_edge:.0f})"
+    assert box_bottom < 255

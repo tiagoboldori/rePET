@@ -191,13 +191,16 @@ def _clean_name(raw: str, default: str) -> str:
 ROW_Y = {"a": "h-190", "b": "h-124"}  # duas linhas de 52 px, 66 px entre elas
 
 
-def _filter_graph(quadra_id: str, volume: int, audio_input: str = "0:a") -> str:
+def _video_filters(quadra_id: str) -> list[str]:
+    """Cadeia de vídeo: 1080p + caixa + textos do placar (canto inferior esquerdo)."""
     d, font = _dir(quadra_id), config.BROADCAST_FONT
     video = [
         # As câmeras não são iguais (quadra1 sai em 1080p, quadra2 em 1440p): tudo vira
         # 1080p antes do overlay, para as posições valerem e o encode custar o mesmo.
         "scale=1920:1080",
-        "drawbox=x=48:y=h-228:w=700:h=180:color=black@0.65:t=fill",
+        # ATENÇÃO: no drawbox `h` é a ALTURA DA CAIXA, não do vídeo (no drawtext é a do vídeo).
+        # Por isso a posição vertical usa `ih`; com `h-228` a caixa ia para o topo (y=-48).
+        "drawbox=x=48:y=ih-228:w=700:h=180:color=black@0.65:t=fill",
         f"drawtext=fontfile={font}:text=SETS:expansion=none:x=500:y=h-218:fontsize=22:fontcolor=0xBBBBBB",
         f"drawtext=fontfile={font}:text=PONTOS:expansion=none:x=610:y=h-218:fontsize=22:fontcolor=0xBBBBBB",
     ]
@@ -208,11 +211,15 @@ def _filter_graph(quadra_id: str, volume: int, audio_input: str = "0:a") -> str:
             f"{base}:textfile={d}/sets_{side}.txt:x=525:fontcolor=yellow",
             f"{base}:textfile={d}/pontos_{side}.txt:x=640:fontcolor=white",
         ]
+    return video
+
+
+def _filter_graph(quadra_id: str, volume: int, audio_input: str = "0:a") -> str:
     audio = (
         f"volume@vol={volume / 100:.3f}:eval=frame,alimiter=limit=0.95,"
         "aresample=44100,aformat=channel_layouts=stereo"
     )
-    return f"[0:v]{','.join(video)}[v];[{audio_input}]{audio}[a]"
+    return f"[0:v]{','.join(_video_filters(quadra_id))}[v];[{audio_input}]{audio}[a]"
 
 
 def _probe_audio(input_url: str) -> bool:
