@@ -25,6 +25,8 @@ A documentação interativa (Swagger) é gerada pelo FastAPI em
 | `POST /broadcast/{quadra_id}/set/{a\|b}` | `X-Live-Key` | +1 set e zera os pontos |
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` | `X-Live-Key` | Sobe/desce o volume com a live no ar |
 | `GET /broadcast`, `GET /broadcast/{quadra_id}` | `X-Live-Key` | Estado (placar, nomes, volume, tempo no ar) |
+| `GET /status` | `X-Live-Key` ou sessão do painel | Uma linha por quadra com os dois modos (direta e placar) |
+| `GET /painel` | página pública; login dentro | Painel web de controle da transmissão |
 | `GET /api/replays/{replay_id}` | nenhuma | Metadados de um replay |
 | `GET /api/replays/{replay_id}/media` | nenhuma | Baixa/assiste o vídeo do replay |
 | `GET /api/quadras/{quadra_id}/replays` | nenhuma | Lista paginada de replays da quadra |
@@ -82,7 +84,10 @@ servidor. A stream key de cada quadra fica em `youtube_stream_key` no
 `config/cameras.json`.
 
 Todas as rotas de live exigem o header `X-Live-Key` com o valor de
-`LIVE_API_KEY` (a mesma chave vale para todas as quadras).
+`LIVE_API_KEY` (a mesma chave vale para todas as quadras). As rotas de `/live` e
+`/broadcast` também aceitam a **sessão do [painel web](#painel-web)** (cookie), que
+é como o painel as usa sem expor a chave. Os dois modos, quando usar cada um e os
+casos de borda estão em [`docs/LIVE.md`](LIVE.md).
 
 ### Ligar
 
@@ -230,7 +235,7 @@ microfone da câmera já chega perto de 0 dBFS em jogo.
   "nomes": {"a": "ANA E BIA", "b": "CRIS E DUDA"},
   "placar": {"a": {"pontos": 2, "sets": 1}, "b": {"pontos": 1, "sets": 0}},
   "volume": 100, "no_ar_ha_segundos": 312, "encerra_em_segundos": 6888, "reinicios": 0,
-  "audio_da_camera": true
+  "travamentos": 0, "transmitindo": true, "audio_da_camera": true
 }
 ```
 
@@ -245,12 +250,101 @@ microfone da câmera já chega perto de 0 dBFS em jogo.
 
 Log do ffmpeg de cada quadra: `logs/broadcast_{quadra_id}.log`.
 
+**`no_ar` x `transmitindo`.** `no_ar` diz que a transmissão foi pedida e está
+ativa; `transmitindo` só é `true` se o ffmpeg está vivo **e produzindo quadros agora**.
+`no_ar: true` com `transmitindo: false` é "tentando": câmera ou YouTube fora, ffmpeg
+reiniciando (veja `reinicios`). `travamentos` conta quantas vezes o ffmpeg ficou vivo
+mas parado (sem quadros por 30 s) e foi morto e relançado pelo watchdog.
+
 **Áudio.** A cada início (e a cada relançamento) a API sonda a câmera. Se ela
 estiver **sem trilha de áudio**, a transmissão sobe com uma trilha de silêncio em
 vez de falhar, e a resposta traz `"audio_da_camera": false` (com `true` a live usa
 o som da câmera; `null` = ainda não sondado ou transmissão readotada após reinício
 da API). O volume só tem efeito quando há áudio da câmera. Dica: um volume 0 deixa
 a live muda; `start` com `reset=true` (padrão) volta o volume a 100%.
+
+---
+
+## Estado geral (`GET /status`)
+
+Uma chamada devolve as quadras com os dois modos, sem consultar câmera nenhuma na
+hora: o estado da live direta vem de uma verificação periódica
+(`LIVE_MONITOR_INTERVAL_SECONDS`, padrão 15 s) que roda em segundo plano.
+
+```bash
+curl http://SERVIDOR:8000/status -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+```json
+{
+  "quadras": [{
+    "quadra_id": "loc1-quadra1", "nome": "Quadra 2", "esporte": "padel",
+    "tem_stream_key": true,
+    "modo": "placar",
+    "direta": {"no_ar": false, "erro": null, "verificado_ha_segundos": 7},
+    "placar": { "...": "o mesmo objeto de GET /broadcast/{quadra_id}" }
+  }],
+  "transmissoes_com_placar": {"no_ar": 1, "limite": 2},
+  "verificacao_na_subida": {"direta": [], "placar": ["loc1-quadra1"], "conflitos": []}
+}
+```
+
+`modo`: `placar`, `direta`, `conflito` (os dois ligados: veja abaixo), `nenhum` ou
+`desconhecido` (a câmera não respondeu e não há transmissão com placar).
+
+### Verificação na subida
+
+Quando a API sobe ela reconcilia o que já estava no ar, e escreve o resultado no log
+(`[startup]`) e em `verificacao_na_subida`:
+
+- **Transmissões com placar:** o ffmpeg que segue vivo é readotado (pelo pid gravado);
+  o que caiu é relançado; um ffmpeg **sem registro** (arquivo de estado perdido) é
+  readotado com nomes e placar lidos do overlay; transmissão de quadra que saiu do
+  `cameras.json` é encerrada; prazo vencido durante a queda encerra na hora.
+- **Live direta:** a API pergunta a cada câmera (ISAPI) se está empurrando. Uma live
+  ligada fora da API, por exemplo na interface web da câmera, **ganha o prazo**
+  `LIVE_MAX_SECONDS` (senão nunca expiraria); prazo gravado de live que já não está no
+  ar é esquecido.
+- **Conflito:** transmissão com placar **e** live direta ao mesmo tempo na mesma
+  quadra (mesma stream key) é apontada no log e no `modo: "conflito"`. A API **não
+  desliga nada sozinha**: quem decide qual encerrar é o operador.
+
+O que isto vê é o lado do servidor e da câmera. Se o YouTube de fato recebe e publica a
+imagem só se confirma no YouTube Studio (a API do YouTube exigiria OAuth, que não está
+configurado).
+
+---
+
+## Painel web
+
+`http://SERVIDOR:8000/painel`: página para operar a transmissão pelo celular ou
+computador. Mostra um cartão por quadra e, conforme o modo:
+
+- **Fora do ar:** nomes das duplas e botões *Iniciar transmissão com placar* e *Iniciar
+  live direta*.
+- **Com placar:** +1 ponto, −1, *Fechar set* (pede confirmação: zera os pontos) e −1 set
+  para cada lado, volume − / +, edição de nomes, zerar placar e *Encerrar*.
+- **Direta:** *Encerrar*.
+- Avisos: quadra sem stream key, limite de 2 transmissões, ffmpeg tentando conectar,
+  câmera sem resposta, conflito entre os dois modos.
+
+A tela atualiza a cada 2 s a partir de `GET /status`.
+
+**Login.** Usa `ADMIN_USERNAME` e `ADMIN_PASSWORD` (os mesmos do `DELETE`); sem eles o
+login responde `503`. A sessão é um cookie `repet_painel` assinado (HMAC), `HttpOnly` e
+`SameSite=Strict`, válido por `PANEL_SESSION_HOURS` (12 h). Reiniciar a API não desloga
+ninguém; trocar a senha (ou `PANEL_SECRET`) desloga todos.
+
+| Rota | Para quê |
+|---|---|
+| `POST /painel/login` `{"usuario","senha"}` | Cria a sessão. `401` credencial errada, `429` depois de 5 erros por IP em 1 min, `503` sem credencial no servidor |
+| `POST /painel/logout` | Apaga o cookie |
+| `GET /painel/me` | `{"usuario"}` ou `401` |
+
+**Segurança.** Com cookie, as rotas que mudam algo exigem também o header
+`X-Painel: 1` (defesa contra CSRF; o painel o envia sozinho), senão `403`. Quem usa o
+header `X-Live-Key` (scripts) não precisa dele. O tráfego é HTTP puro: na rede interna a
+senha segue em claro; para acesso de fora, ponha um proxy HTTPS na frente.
 
 ---
 

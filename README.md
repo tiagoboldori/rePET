@@ -145,7 +145,7 @@ só com a música; a live, como é a câmera quem transmite, fica sem trilha de
 
 ## API
 
-Referência completa de rotas, com exemplos de `curl` (gravar replay, subir/desligar a live, consultar e apagar replays): [`docs/API.md`](docs/API.md).
+Referência completa de rotas, com exemplos de `curl` (gravar replay, live direta, transmissão com placar, painel, consultar e apagar replays): [`docs/API.md`](docs/API.md). Como as duas modalidades de live funcionam, quando usar cada uma e os casos de borda: [`docs/LIVE.md`](docs/LIVE.md).
 
 Público (sem autenticação):
 
@@ -168,6 +168,8 @@ Público (sem autenticação):
 | `POST /broadcast/{quadra_id}/ponto/{a\|b}` · `.../set/{a\|b}` | +1 ponto (`?delta=-1` corrige) · +1 set e zera os pontos dos dois lados |
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` · `PUT .../volume` | Volume ao vivo, em % do da câmera (100 = original) |
 | `GET /broadcast`, `GET /broadcast/{quadra_id}`, `PUT .../placar`, `PUT .../nomes`, `POST .../placar/zerar` | Estado e correções manuais |
+| `GET /status` | Uma linha por quadra com os dois modos (direta e placar), sem consultar câmera na hora |
+| `GET /painel` | **Painel web** de controle da transmissão (login com `ADMIN_USERNAME`/`ADMIN_PASSWORD`) |
 
 A live é da câmera (Hikvision, vídeo 1080p H.264 do stream principal + áudio AAC
 mono 16 kHz): sobrevive a reinício da API, a câmera reconecta sozinha se o RTMP
@@ -182,8 +184,18 @@ YouTube. Custo medido: ~1 a 1,5 núcleo e ~0,4 a 0,7 GB por transmissão (limite
 2 simultâneas). O ffmpeg roda destacado: reiniciar só a API não o derruba (o
 `resume()` o readota) e, se ele cair, a API o relança. **Atenção:** `systemctl
 restart repet` (`KillMode=control-group`; o serviço costuma reiniciar por volta das 06:00) mata o cgroup inteiro e
-derruba a transmissão; já a live direta, que é da câmera, sobrevive. Detalhes e
-exemplos em [`docs/API.md`](docs/API.md).
+derruba a transmissão; já a live direta, que é da câmera, sobrevive.
+
+Se o ffmpeg ficar vivo mas parar de produzir quadros (rede do YouTube, RTSP congelado),
+um watchdog o mata e relança (`travamentos` na resposta). Na subida a API reconcilia o
+que já estava no ar (readota ffmpeg, dá prazo a live direta ligada fora da API, aponta
+conflito entre os dois modos).
+
+**Painel web:** `http://SERVIDOR:8000/painel` (celular ou computador) liga/encerra as
+duas modalidades e controla placar, sets, nomes e volume. Exige `ADMIN_USERNAME` e
+`ADMIN_PASSWORD` no `.env`; trafega em HTTP puro (na rede interna). Os dois modos, os
+casos de borda tratados e o que ainda não é coberto estão em
+[`docs/LIVE.md`](docs/LIVE.md); as rotas, com exemplos, em [`docs/API.md`](docs/API.md).
 
 Protegido por HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default —
 sem configurar, responde `401` sempre):
@@ -221,6 +233,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
 | `BROADCAST_MAX_CONCURRENT` / `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `2` / `ultrafast` / `4500k` / `4` | Transmissão com placar: simultâneas, preset x264, bitrate e núcleos por transmissão |
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do `volume/up\|down` e teto, em % |
+| `LIVE_MONITOR_INTERVAL_SECONDS` | `15` | Intervalo da verificação (em segundo plano) das lives diretas nas câmeras |
+| `PANEL_SESSION_HOURS` / `PANEL_SECRET` | `12` / vazio | Validade da sessão do painel; segredo extra que assina o cookie |
 | `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube |
 | `BUFFER_ROOT` | `/var/replay` | Segmentos brutos (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) |
 | `OUTPUT_DIR` | `/var/replay/output` | Clipes finais (`<quadra_id>_<timestamp>.mp4`, mais variantes `_oriented`/`_overlay`) |
