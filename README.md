@@ -343,8 +343,12 @@ curl -s -X PUT $BASE/broadcast/loc1-quadra1/audio \
   -d '{"corte_agudos": "medio", "reducao_ruido": "medio"}'
 ```
 
-`aplicado_ao_vivo: false` quer dizer que o ffmpeg não confirmou (ajuste guardado, vale ao relançar): repita o `PUT` para
-tentar de novo. Custo medido: ~+1% de um núcleo por transmissão. Não vale para a live direta (sai da câmera) nem para os
+O ffmpeg lê um comando por vez (a cada `-stats_period`, 1 s nas transmissões novas, 5 s nas antigas), então a confirmação pode
+demorar alguns segundos: com `confirmacao_pendente: true` o ajuste já foi enviado, e o `GET` mostra `aplicado_ao_vivo: true` quando chega.
+Vários `PUT` seguidos (inclusive de duas abas) são seguros: cada um manda só o que mudou, na ordem dos ajustes gravados, e a
+confirmação conta a fila inteira do ffmpeg (volume incluído), então o "aguardando a confirmação" não vira erro falso.
+`aplicado_ao_vivo: false` com `confirmacao_pendente: false` quer dizer que o ffmpeg recusou ou não respondeu (ajuste guardado, vale ao
+relançar): repita o `PUT` para tentar de novo. Custo medido: ~+1% de um núcleo por transmissão. Não vale para a live direta (sai da câmera) nem para os
 replays. Detalhes em [`docs/API.md`](docs/API.md#áudio-corte-de-agudos-e-redução-de-ruído).
 
 #### 5. Live direta (sem placar, a câmera é quem transmite)

@@ -74,8 +74,9 @@ câmera ──RTSP──▶ ffmpeg ──RTMP──▶ YouTube
   real das quadras: o corte reduz o chiado agudo em ~3 a ~16 dB conforme o nível, a voz até 3,4 kHz não muda, e o custo é
   **+1,1% de um núcleo** sobre ~114%. Os níveis só trocam parâmetros (mix, frequência), então
   [`PUT /broadcast/{id}/audio`](API.md#áudio-corte-de-agudos-e-redução-de-ruído) e a aba *Áudio* do painel os trocam **ao vivo, sem
-  relançar**, pelo mesmo canal do volume (o stdin do ffmpeg): o ffmpeg processa **um comando a cada ~0,5 s**, então a API manda só
-  o que mudou e **confirma pelas respostas dele** (`ret:0` aplicou, `ret:-38` o filtro não existe, `ret:-34` valor inválido).
+  relançar**, pelo mesmo canal do volume (o stdin do ffmpeg): o ffmpeg lê **um comando por `-stats_period`** (medido: 5 s por comando com o período antigo, 1 s com o atual), então a API manda só
+  o que mudou e **confirma pelas respostas dele**, contando a **fila inteira** (volume e `PUT` anteriores incluídos; a ordem na fila
+  é a ordem dos ajustes gravados, mesmo com duas abas mexendo ao mesmo tempo), com paciência: se não chegam a tempo, o estado fica `confirmacao_pendente` e é resolvido em segundo plano (`ret:0` aplicou, `ret:-38` o filtro não existe, `ret:-34` valor inválido).
   O ajuste fica gravado no estado (sobrevive a reinício) e, ao readotar um ffmpeg, a API reenvia os gravados; uma transmissão que
   subiu **antes** desta cadeia não tem os filtros (`aplicado_ao_vivo: false`) e só muda ao ser relançada. Com a quadra fora do
   ar o ajuste vale ao iniciar. "off" deixa o filtro transparente (mix=0 / om=i), nunca o remove. A live direta não tem isso (sai da

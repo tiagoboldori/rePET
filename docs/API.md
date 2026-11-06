@@ -1035,7 +1035,8 @@ curl -s http://SERVIDOR:8000/broadcast/loc1-quadra1/audio -H "Authorization: Bea
     "corte_agudos": ["off", "suave", "medio", "forte", "maximo"]
   },
   "no_ar": true,
-  "aplicado_ao_vivo": true
+  "aplicado_ao_vivo": true,
+  "confirmacao_pendente": false
 }
 ```
 
@@ -1045,11 +1046,23 @@ curl -s http://SERVIDOR:8000/broadcast/loc1-quadra1/audio -H "Authorization: Bea
 | `padrao` | O padrão do servidor (`AUDIO_DENOISE` e `AUDIO_CORTE_AGUDOS`) |
 | `niveis` | Os valores aceitos |
 | `no_ar` | A transmissão com placar desta quadra está no ar |
-| `aplicado_ao_vivo` | `null` com a quadra fora do ar (vale ao iniciar). Com ela no ar: `true` = o ffmpeg **confirmou** o ajuste; `false` = não confirmou (o ajuste fica gravado e vale ao relançar) |
+| `aplicado_ao_vivo` | `null` com a quadra fora do ar (vale ao iniciar). Com ela no ar: `true` = o ffmpeg **confirmou** o ajuste; `false` = ainda não confirmou (veja `confirmacao_pendente`) |
+| `confirmacao_pendente` | `true` = os comandos já foram enviados ao ffmpeg e a confirmação ainda está chegando; `aplicado_ao_vivo` vira `true` (ou `false` de vez) sozinho em alguns segundos. Consulte o `GET` de novo. `false` com `aplicado_ao_vivo: false` = o ffmpeg recusou ou não respondeu: o ajuste fica gravado e vale ao relançar |
 
 `PUT` troca o que vier no corpo (pelo menos um campo; o outro não muda; `null` é recusado). **Com a transmissão no ar
 vale na hora, sem relançar nem cortar a live**: a API manda ao ffmpeg só o que mudou e espera a confirmação dele
-(cada comando leva ~0,1 a 0,5 s, então a resposta pode demorar um ou dois segundos). Fora do ar só grava.
+. **O ffmpeg lê um comando por período de estatística** (`-stats_period`; medido em produção: um a cada 5 s com o período
+antigo, um por segundo com o atual de 1 s), então a resposta pode demorar alguns segundos. Se a confirmação não chega a
+tempo, o `PUT` responde mesmo assim com `aplicado_ao_vivo: false` e `confirmacao_pendente: true` e a API continua esperando em
+segundo plano: **o ajuste já foi enviado e costuma valer logo depois**, e o `GET` passa a mostrar `aplicado_ao_vivo: true`.
+Fora do ar só grava. Uma transmissão que subiu antes de o período cair para 1 s continua lenta (5 s por comando) até ser relançada.
+
+Vários `PUT` seguidos (da mesma aba ou de abas/sistemas diferentes) são seguros: os comandos entram na fila do ffmpeg **na ordem
+dos ajustes gravados** (o som termina exatamente no último ajuste), cada `PUT` envia **só o que mudou** em relação ao anterior
+(mesmo com o anterior ainda pendente) e a confirmação **conta a fila inteira**, incluindo comandos de volume e de outros `PUT`,
+em vez de esperar só os comandos do próprio pedido. O `PUT` espera no máximo ~12 s pela confirmação; o que faltar é resolvido em
+segundo plano. O conjunto completo só é reenviado depois de uma recusa do ffmpeg ou ao readotar o processo (reinício da API,
+quando o período real do ffmpeg é lido do próprio processo e a fila ainda não lida é estimada).
 
 ```bash
 # corte de agudos médio (4 kHz): o ponto de partida recomendado
@@ -1064,7 +1077,7 @@ curl -s -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/audio \
 ```
 
 Resposta `200`: o mesmo objeto do `GET` com `status` na frente (`"atualizada"` ou `"sem_mudanca"`). Repetir o `PUT`
-com o mesmo valor quando `aplicado_ao_vivo` veio `false` **tenta aplicar de novo**.
+com o mesmo valor quando `aplicado_ao_vivo` veio `false` e `confirmacao_pendente` veio `false` **tenta aplicar de novo**.
 
 | Código | Quando | `detail` de exemplo |
 |---|---|---|

@@ -19,14 +19,18 @@ Como as peças se encaixam:
 Limite: BROADCAST_MAX_CONCURRENT transmissões ao mesmo tempo (padrão 2).
 """
 import errno
+import fcntl
 import json
 import os
 import re
 import signal
+import struct
 import subprocess
+import termios
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from api import config
 
@@ -239,11 +243,22 @@ _CORTE = {"suave": (5000,), "medio": (4000,), "forte": (4000, 4000), "maximo": (
 _LEVEL_ALIASES = {"médio": "medio", "máximo": "maximo", "desligado": "off", "desligada": "off", "nao": "off",
                   "não": "off", "0": "off", "false": "off"}
 _BYPASS_HZ = 7900  # frequência de repouso dos lowpass em modo transparente (abaixo de Nyquist a 16 kHz)
-AUDIO_APPLY_TIMEOUT = 2.0  # espera mínima pelas respostas do ffmpeg a uma troca ao vivo...
-AUDIO_APPLY_PER_COMMAND = 0.7  # ...mais isto por comando (o ffmpeg processa um a cada ~0,5 s)
+# O ffmpeg só lê comandos (volume, áudio) uma vez por período de estatística (-stats_period): MEDIDO em produção, ele
+# processa UM comando a cada período (5 s -> 5 s por comando; 1 s -> 1 s). Por isso o período é 1 s, e quem subiu antes
+# (5 s) ainda demora mais: a API espera o razoável na requisição e confirma o resto em segundo plano.
+STATS_PERIOD_SECONDS = 1.0
+LEGACY_STATS_PERIOD_SECONDS = 5.0  # transmissões que subiram antes de o período cair para 1 s
+AUDIO_APPLY_TIMEOUT = 2.0  # espera mínima, na requisição, pelas respostas do ffmpeg a uma troca ao vivo...
+AUDIO_APPLY_MARGIN = 0.7  # ...mais (período + isto) por comando na fila (os que estão à frente incluídos)...
+AUDIO_REQUEST_MAX_WAIT = 12.0  # ...limitada a isto: a requisição não pode ficar presa
+AUDIO_RECONCILE_FACTOR = 1.6  # o segundo plano espera (fila x período) x isto...
+AUDIO_RECONCILE_BASE = 15.0  # ...mais isto, antes de desistir e marcar "não confirmou"
 _REPLY_RE = re.compile(rb"Command reply for stream \d+: ret:(-?\d+)")
 _denoise_filter_ok: bool | None = None
-_audio_live: dict[str, bool] = {}  # quadra -> o ffmpeg no ar está com os ajustes gravados? (só vale com a quadra no ar)
+# quadra -> o ffmpeg no ar está com os ajustes gravados? True = confirmado; False = não confirmou; "pendente" = comandos
+# enviados, confirmação ainda por chegar (ver _reconcile_audio). Só vale com a quadra no ar.
+_audio_live: dict[str, bool | str] = {}
+_audio_gen: dict[str, int] = {}  # geração da última aplicação (uma reconciliação antiga não pode sobrescrever uma nova)
 
 
 def _denoise_available() -> bool:
@@ -360,7 +375,7 @@ def _ffmpeg_cmd(
     # Câmera sem áudio: sem isto o ffmpeg sairia com "matches no streams" e o supervisor
     # relançaria para sempre, com a API dizendo no_ar. Vai silêncio (-re segura o ritmo
     # e -shortest encerra junto com o vídeo, senão o anullsrc infinito prenderia o ffmpeg).
-    progress = ["-progress", str(_progress(quadra_id)), "-stats_period", "5"]
+    progress = ["-progress", str(_progress(quadra_id)), "-stats_period", f"{STATS_PERIOD_SECONDS:g}"]
     silence = [] if has_audio else ["-re", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
     return [
         "ffmpeg", "-loglevel", "warning", *progress,
@@ -406,6 +421,7 @@ def _spawn(quadra_id: str, camera: dict, runtime: _Runtime, has_audio: bool) -> 
     except OSError:
         pass
     _progress(quadra_id).write_text("")  # o -progress de um ffmpeg velho não pode enganar o watchdog
+    _reset_channel(quadra_id, STATS_PERIOD_SECONDS)  # ffmpeg novo: fila vazia, conta de respostas do zero
     runtime.has_audio = has_audio
     if not has_audio:
         print(f"[broadcast] {quadra_id}: a câmera não tem áudio; a transmissão vai com silêncio.")
@@ -740,6 +756,7 @@ def resume(cameras: dict[str, dict]) -> dict:
             runtime = _Runtime()
             if _pid_is_ours(st.get("pid"), quadra_id):
                 runtime.last_spawn = runtime.last_frame_change = time.time()
+                _reset_channel(quadra_id, _proc_stats_period(st["pid"]), _fifo_queued(quadra_id))
                 print(f"[broadcast] {quadra_id}: readotando ffmpeg pid {st['pid']}.")
                 summary["readotadas"].append(quadra_id)
             else:
@@ -747,7 +764,9 @@ def resume(cameras: dict[str, dict]) -> dict:
             _launch_supervisor(quadra_id, camera, runtime)  # se não está vivo, ele relança
         _persist()
     for quadra_id in summary["readotadas"] + summary["orfas_adotadas"]:
-        _sync_audio(quadra_id)  # fora do lock: espera as respostas do ffmpeg
+        with _lock:
+            _audio_live[quadra_id] = "pendente"  # até a sincronização dizer o contrário
+        threading.Thread(target=_sync_audio, args=(quadra_id,), daemon=True, name=f"audio-sync-{quadra_id}").start()
     return summary
 
 
@@ -832,7 +851,7 @@ def set_volume(quadra_id: str, level: int) -> dict:
         st = _st(quadra_id)
         st["volume"] = level
         _persist()  # grava antes: se o ffmpeg reiniciar, nasce já com este volume
-        if st["no_ar"] and not _send(quadra_id, f"cvolume@vol -1 volume {level / 100:.3f}\n"):
+        if st["no_ar"] and _write_commands(quadra_id, [f"volume@vol -1 volume {level / 100:.3f}"]) is None:
             raise BroadcastError("o ffmpeg não está lendo comandos agora (reiniciando?); tente de novo.", 503)
         return snapshot(quadra_id)
 
@@ -851,34 +870,182 @@ def _normalize_level(value, niveis: tuple, campo: str) -> str:
     return level
 
 
-def _apply_audio_live(quadra_id: str, settings: dict, previous: dict | None = None) -> bool:
-    """Leva o ffmpeg que está no ar aos ajustes de áudio, sem relançar, e CONFIRMA: o ffmpeg responde a cada comando, na
-    ordem, com `ret:0` (aplicou), `ret:-38` (o filtro não existe: transmissão que subiu antes desta cadeia) ou
-    `ret:-34` (valor inválido). True só se todas as respostas chegaram e foram ret:0."""
+class _Channel:
+    """Contabilidade do canal de comandos (stdin) de UM ffmpeg: quantos comandos foram escritos e quantas respostas ele já
+    deu no log, EM ORDEM (a resposta N é do comando N). Como o ffmpeg lê um comando por -stats_period, comandos de trocas
+    de áudio e de volume ENFILEIRAM; sem esta conta, uma troca nova achava que estava sozinha na fila e dava "não confirmou"
+    quando só havia fila. `floor` é o índice do último conjunto COMPLETO enviado: recusas anteriores a ele não valem mais."""
+
+    def __init__(self, period: float, pos: int = 0, queued: int = 0):
+        self.period = period
+        self.pos = pos  # até onde o log já foi varrido
+        self.sent = queued  # comandos escritos (inclui os que já estavam na fila quando a API readotou o ffmpeg)
+        self.replies: list[int] = []
+        self.trimmed = 0  # respostas descartadas do começo da lista (memória limitada)
+        self.floor = queued
+
+    @property
+    def answered(self) -> int:
+        return self.trimmed + len(self.replies)
+
+
+class _Ticket(NamedTuple):
+    n: int  # comandos desta troca
+    target: int  # índice cumulativo do último comando desta troca: ele terminou quando answered >= target
+    ahead: int  # comandos que já estavam na fila à frente
+    period: float
+    gen: int
+
+
+_channels: dict[str, _Channel] = {}
+_chan_lock = threading.RLock()
+_audio_cmd_lock = threading.RLock()  # serializa "gravar o ajuste + escrever os comandos": a ordem na fila é a ordem dos ajustes
+
+
+def _log_path(quadra_id: str) -> Path:
+    return config.BROADCAST_LOG_DIR / f"broadcast_{quadra_id}.log"
+
+
+def _reset_channel(quadra_id: str, period: float, queued: int = 0) -> None:
+    """Começa a contar de novo (ffmpeg novo, ou readotado). A partir do fim atual do log."""
+    try:
+        pos = _log_path(quadra_id).stat().st_size
+    except OSError:
+        pos = 0
+    with _chan_lock:
+        _channels[quadra_id] = _Channel(period, pos, queued)
+
+
+def _proc_stats_period(pid: int | None) -> float:
+    """-stats_period do ffmpeg que está rodando (lido do processo); o antigo, de 5 s, se não der para saber."""
+    try:
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        return float(args[args.index(b"-stats_period") + 1])
+    except (OSError, ValueError, IndexError, TypeError):
+        return LEGACY_STATS_PERIOD_SECONDS
+
+
+def _fifo_queued(quadra_id: str) -> int:
+    """Estimativa de quantos comandos ainda estão na fila do ffmpeg sem ler (bytes pendentes / ~31 por comando)."""
+    try:
+        fd = os.open(_fifo(quadra_id), os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return 0
+    try:
+        size = struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, struct.pack("i", 0)))[0]
+    except OSError:
+        size = 0
+    finally:
+        os.close(fd)
+    return -(-size // 31)
+
+
+def _scan_channel(quadra_id: str) -> _Channel | None:
+    """Lê o que o log ganhou desde a última varredura e registra as respostas de comando, em ordem."""
+    with _chan_lock:
+        ch = _channels.get(quadra_id)
+        if ch is None:
+            return None
+        try:
+            with open(_log_path(quadra_id), "rb") as fh:
+                fh.seek(ch.pos)
+                data = fh.read()
+        except OSError:
+            return ch
+        end = 0
+        for m in _REPLY_RE.finditer(data):
+            ch.replies.append(int(m.group(1)))
+            end = m.end()
+        ch.pos += max(end, len(data) - 120)  # guarda a ponta: uma resposta pode estar cortada no meio
+        if len(ch.replies) > 2000:
+            ch.trimmed += 1000
+            del ch.replies[:1000]
+        return ch
+
+
+def _write_commands(quadra_id: str, cmds: list[str], full: bool = False) -> tuple[int, int, float] | None:
+    """Escreve comandos no stdin do ffmpeg e conta. Devolve (target, ahead, period) ou None se ninguém está lendo.
+    `full` = conjunto completo (zera o que valia das recusas anteriores)."""
+    with _chan_lock:
+        ch = _scan_channel(quadra_id)
+        if ch is None:  # canal não rastreado (não deveria acontecer): assume o período antigo, que é o mais lento
+            _reset_channel(quadra_id, LEGACY_STATS_PERIOD_SECONDS)
+            ch = _channels[quadra_id]
+        ahead = max(ch.sent - ch.answered, 0)
+        if not _send(quadra_id, "".join(f"c{c}\n" for c in cmds)):
+            return None
+        if full:
+            ch.floor = ch.sent
+        ch.sent += len(cmds)
+        return ch.sent, ahead, ch.period
+
+
+def _batch_status(quadra_id: str, target: int, n: int) -> bool | None:
+    """True = o ffmpeg já respondeu a tudo até `target` e nada foi recusado desde o último conjunto completo; False = houve
+    recusa (ret != 0); None = ainda esperando respostas."""
+    ch = _scan_channel(quadra_id)
+    if ch is None:
+        return None
+    lo = max(ch.floor, ch.trimmed)
+    hi = min(target, ch.answered)
+    if any(r != 0 for r in ch.replies[lo - ch.trimmed:hi - ch.trimmed]):
+        return False
+    return True if ch.answered >= target else None
+
+
+def _reconcile_audio(quadra_id: str, t: _Ticket) -> None:
+    """Segundo plano: o ffmpeg ainda não respondeu a tudo dentro do prazo da requisição (fila + período lento). Continua
+    esperando, proporcional à fila, e só então decide `aplicado_ao_vivo`."""
+    deadline = time.time() + (t.ahead + t.n) * t.period * AUDIO_RECONCILE_FACTOR + AUDIO_RECONCILE_BASE
+    status: bool | None = None
+    while time.time() < deadline:
+        if _audio_gen.get(quadra_id) != t.gen:
+            return  # uma troca mais nova assumiu: é ela que decide
+        status = _batch_status(quadra_id, t.target, t.n)
+        if status is not None:
+            break
+        time.sleep(0.5)
+    ok = status is True
+    with _lock:
+        if _audio_gen.get(quadra_id) == t.gen and _audio_live.get(quadra_id) == "pendente":
+            _audio_live[quadra_id] = ok
+    if not ok:
+        print(f"[broadcast] {quadra_id}: o ffmpeg não confirmou os ajustes de áudio a tempo ou recusou.")
+
+
+def _send_audio(quadra_id: str, settings: dict, previous: dict | None = None) -> "_Ticket | bool":
+    """Escreve os comandos que levam o ffmpeg aos ajustes (só o delta se `previous` vier; senão o conjunto completo).
+    Chamar com _audio_cmd_lock. Devolve o _Ticket, True (nada a mudar) ou False (ninguém lendo comandos)."""
     cmds = _audio_commands(settings, previous)
     if not cmds:
-        return True  # nada a mudar na cadeia no ar
-    log_path = config.BROADCAST_LOG_DIR / f"broadcast_{quadra_id}.log"
-    try:
-        offset = log_path.stat().st_size
-    except OSError:
-        offset = 0
+        return True
+    written = _write_commands(quadra_id, cmds, full=previous is None)
     with _lock:
-        if not _send(quadra_id, "".join(f"c{c}\n" for c in cmds)):
+        gen = _audio_gen[quadra_id] = _audio_gen.get(quadra_id, 0) + 1
+        if written is None:
+            _audio_live[quadra_id] = False
             return False
-    deadline = time.time() + AUDIO_APPLY_TIMEOUT + AUDIO_APPLY_PER_COMMAND * len(cmds)
-    replies: list[int] = []
-    while True:
-        try:
-            with open(log_path, "rb") as fh:
-                fh.seek(offset)
-                replies = [int(x) for x in _REPLY_RE.findall(fh.read())]
-        except OSError:
-            replies = []
-        if len(replies) >= len(cmds) or time.time() >= deadline:
-            break
+        _audio_live[quadra_id] = "pendente"  # enviado; vira True/False quando as respostas chegarem
+    target, ahead, period = written
+    return _Ticket(len(cmds), target, ahead, period, gen)
+
+
+def _await_audio(quadra_id: str, t: _Ticket) -> bool | str:
+    """Espera, na requisição, a confirmação de uma troca (prazo proporcional à fila). True/False se resolveu; "pendente" se
+    o prazo acabou e a confirmação continua em segundo plano. Grava o estado em `_audio_live`."""
+    wait = min(AUDIO_APPLY_TIMEOUT + (t.ahead + t.n) * (t.period + AUDIO_APPLY_MARGIN), AUDIO_REQUEST_MAX_WAIT)
+    deadline = time.time() + wait
+    status = _batch_status(quadra_id, t.target, t.n)
+    while status is None and time.time() < deadline:
         time.sleep(0.1)
-    return len(replies) >= len(cmds) and all(r == 0 for r in replies[: len(cmds)])
+        status = _batch_status(quadra_id, t.target, t.n)
+    if status is not None:
+        with _lock:
+            if _audio_gen.get(quadra_id) == t.gen:
+                _audio_live[quadra_id] = status
+        return status
+    threading.Thread(target=_reconcile_audio, args=(quadra_id, t), daemon=True, name=f"audio-{quadra_id}").start()
+    return "pendente"
 
 
 def audio_view(quadra_id: str) -> dict:
@@ -891,7 +1058,8 @@ def audio_view(quadra_id: str) -> dict:
             "padrao": audio_defaults(),
             "niveis": {"reducao_ruido": list(REDUCAO_RUIDO_NIVEIS), "corte_agudos": list(CORTE_AGUDOS_NIVEIS)},
             "no_ar": st["no_ar"],
-            "aplicado_ao_vivo": _audio_live.get(quadra_id, False) if st["no_ar"] else None,
+            "aplicado_ao_vivo": (_audio_live.get(quadra_id, False) is True) if st["no_ar"] else None,
+            "confirmacao_pendente": bool(st["no_ar"] and _audio_live.get(quadra_id) == "pendente"),
         }
 
 
@@ -907,39 +1075,45 @@ def set_audio(quadra_id: str, reducao_ruido: str | None = None, corte_agudos: st
         new["reducao_ruido"] = _normalize_level(reducao_ruido, REDUCAO_RUIDO_NIVEIS, "reducao_ruido")
     if corte_agudos is not None:
         new["corte_agudos"] = _normalize_level(corte_agudos, CORTE_AGUDOS_NIVEIS, "corte_agudos")
-    with _lock:
-        st = _st(quadra_id)
-        before = _audio_of(st)
-        after = {**before, **new}
-        stored = st.get("audio") if isinstance(st.get("audio"), dict) else {}
-        pinned = any(stored.get(k) != v for k, v in new.items())  # gravar explicitamente também conta (fixa o valor)
-        if pinned:
-            st["audio"] = {**stored, **new}
-            _persist()
-        changed = after != before
-        in_sync = _audio_live.get(quadra_id) is True  # o ffmpeg no ar está exatamente em `before`: dá para mandar só o delta
-        retry = _audio_live.get(quadra_id) is False
-        on_air = st["no_ar"]
-    if on_air and (changed or retry):
-        ok = _apply_audio_live(quadra_id, after, before if in_sync else None)  # fora do lock: espera as respostas
+    ticket: "_Ticket | bool | None" = None
+    with _audio_cmd_lock:  # a ordem dos comandos na fila do ffmpeg tem de ser a ordem dos ajustes, mesmo com duas abas
         with _lock:
-            _audio_live[quadra_id] = ok
+            st = _st(quadra_id)
+            before = _audio_of(st)
+            after = {**before, **new}
+            stored = st.get("audio") if isinstance(st.get("audio"), dict) else {}
+            pinned = any(stored.get(k) != v for k, v in new.items())  # gravar explicitamente também conta (fixa o valor)
+            if pinned:
+                st["audio"] = {**stored, **new}
+                _persist()
+            changed = after != before
+            live = _audio_live.get(quadra_id)
+            # Com a troca anterior confirmada OU ainda na fila, o ffmpeg vai estar em `before`: basta o delta. Sem isso
+            # (recusou, ou não se sabe) manda o conjunto completo, que também conserta qualquer estado divergente.
+            in_sync = live is True or live == "pendente"
+            retry = live is False
+            on_air = st["no_ar"]
+        if on_air and (changed or retry):
+            ticket = _send_audio(quadra_id, after, before if in_sync else None)
+    if isinstance(ticket, _Ticket):
+        _await_audio(quadra_id, ticket)  # fora das travas: espera as respostas
     return audio_view(quadra_id), changed or pinned
 
 
 def _sync_audio(quadra_id: str) -> None:
-    """Depois de readotar um ffmpeg (a API reiniciou), manda os ajustes gravados: garante que ele os usa e descobre se
-    subiu com uma cadeia antiga, sem os filtros nomeados (aí fica `aplicado_ao_vivo: false` até relançar)."""
+    """Depois de readotar um ffmpeg (a API reiniciou), manda os ajustes gravados (conjunto completo): garante que ele os usa e
+    descobre se subiu com uma cadeia antiga, sem os filtros nomeados (aí fica `aplicado_ao_vivo: false` até relançar)."""
     with _lock:
         st = _st(quadra_id)
         settings, on_air = _audio_of(st), st["no_ar"]
-    if on_air:
-        ok = _apply_audio_live(quadra_id, settings)
-        with _lock:
-            _audio_live[quadra_id] = ok
-        if not ok:
-            print(f"[broadcast] {quadra_id}: o ffmpeg readotado não aceitou os ajustes de áudio ao vivo "
-                  "(subiu com a cadeia antiga?); valem quando a transmissão for relançada.")
+    if not on_air:
+        return
+    with _audio_cmd_lock:
+        ticket = _send_audio(quadra_id, settings, None)
+    result = _await_audio(quadra_id, ticket) if isinstance(ticket, _Ticket) else ticket
+    if result is False:
+        print(f"[broadcast] {quadra_id}: o ffmpeg readotado não aceitou os ajustes de áudio ao vivo "
+              "(subiu com a cadeia antiga?); valem quando a transmissão for relançada.")
 
 
 def snapshot(quadra_id: str) -> dict:

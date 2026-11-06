@@ -164,7 +164,7 @@ pintarBotaoTema();
 
 function showLogin() {
   clearInterval(pollTimer);
-  for (const card of cards.values()) clearTimeout(card.dest.revealTimer);
+  for (const card of cards.values()) { clearTimeout(card.dest.revealTimer); clearTimeout(card.audio.pollTimer); }
   cards.clear();
   $("#quadras").replaceChildren();   // nada de key ou placar fica na tela de quem saiu
   overview = null;
@@ -643,7 +643,7 @@ function buildSegmented(rotulo, opcoes, onPick) {
 }
 
 function buildAudio(card) {
-  const d = card.audio = { data: null, busy: false };
+  const d = card.audio = { data: null, busy: false, pollTimer: null };
   const pan = el("div", "aba");
   pan.append(el("p", "hint", "Ajustes desta quadra. Valem ao vivo, sem derrubar a transmissão, e ficam guardados. Ouça e ajuste: cada passo é reversível."));
 
@@ -703,6 +703,7 @@ async function setAudio(card, corpo) {
     d.data = await api(`/broadcast/${card.id}/audio`, "PUT", corpo);
     renderAudio(card);
     if (d.data.no_ar && d.data.aplicado_ao_vivo) toast("Áudio ajustado ao vivo.", true);
+    else if (d.data.no_ar && d.data.confirmacao_pendente) toast("Enviado ao ffmpeg; aguardando a confirmação.", true);
     else if (!d.data.no_ar) toast("Ajuste guardado: vale quando a transmissão for iniciada.", true);
   } catch (e) {
     toast(e.message);
@@ -716,6 +717,7 @@ async function setAudio(card, corpo) {
 function renderAudio(card) {
   const d = card.audio, data = d.data;
   if (!data) return;
+  clearTimeout(d.pollTimer);
   for (const [grupo, campo] of [[d.corte, "corte_agudos"], [d.ruido, "reducao_ruido"]]) {
     const v = data[campo];
     grupo.seg.set(v);
@@ -735,6 +737,12 @@ function renderAudio(card) {
     d.estado.className = "nota ok";
     d.estadoIco.replaceChildren(icon("check"));
     d.estadoTxt.textContent = "Aplicado ao vivo agora.";
+  } else if (data.confirmacao_pendente) {
+    // O ffmpeg lê um comando por vez (a cada período de estatística): a troca já foi enviada e a confirmação demora.
+    d.estado.className = "nota";
+    d.estadoIco.replaceChildren(icon("clock"));
+    d.estadoTxt.textContent = "Enviado ao ffmpeg; aguardando a confirmação (leva alguns segundos)…";
+    d.pollTimer = setTimeout(() => { if (card.aba === "audio" && !d.busy) loadAudio(card); }, 2000);
   } else {
     d.estado.className = "nota warn";
     d.estadoIco.replaceChildren(icon("alert"));
