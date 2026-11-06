@@ -5,6 +5,7 @@
  *   GET /quadras/{id}/youtube          resumo (key mascarada, URL efetiva, hosts permitidos)
  *   GET/PUT /quadras/{id}/youtube/key  a key inteira / troca da key
  *   PUT /quadras/{id}/youtube/url      troca da URL RTMP (null volta à global)
+ *   GET/PUT /broadcast/{id}/audio      corte de agudos e redução de ruído (valem ao vivo, sem relançar)
  */
 
 const POLL_MS = 2000;
@@ -603,43 +604,182 @@ function applyLock(card) {
   setDisabled(d.btnUrlPadrao, locked || Boolean(d.data && d.data.rtmp_url_padrao));
 }
 
+// --- cartão: aba "Áudio" (corte de agudos e redução de ruído) ---------------------------------------
+
+const CORTE_OPCOES = [
+  { v: "off", rot: "Off", desc: "Sem corte de agudos: o chiado agudo passa como a câmera entrega." },
+  { v: "suave", rot: "Suave", desc: "Corte em 5 kHz: reduz ~3 dB do agudo. A voz continua intacta." },
+  { v: "medio", rot: "Médio", desc: "Corte em 4 kHz: reduz ~6,5 dB do agudo e mantém a voz intacta. Ponto de partida recomendado." },
+  { v: "forte", rot: "Forte", desc: "Corte íngreme em 4 kHz: reduz ~11 dB do agudo. O som fica mais abafado (perde o brilho de consoantes e batidas)." },
+  { v: "maximo", rot: "Máximo", desc: "Corte íngreme em 3,5 kHz: reduz ~16 dB do agudo. Bem abafado: use só se o chiado for o pior problema." },
+];
+const RUIDO_OPCOES = [
+  { v: "off", rot: "Off", desc: "Sem redução de ruído de fundo e sem corte do grave." },
+  { v: "leve", rot: "Leve", desc: "Corta o zumbido grave (< 100 Hz) e rebaixa pouco o ruído de fundo nos intervalos." },
+  { v: "medio", rot: "Média", desc: "Corta o zumbido grave e rebaixa o ruído de fundo nos intervalos. É discreto de propósito: não tira chiado que está misturado com o som." },
+  { v: "forte", rot: "Forte", desc: "Rebaixa mais, mas pode deixar um som metálico. Para chiado agudo, prefira o corte de agudos." },
+];
+
+/* Controle de escolha única (radiogroup). Devolve {root, set(valor), lock(bool)}. */
+function buildSegmented(rotulo, opcoes, onPick) {
+  const root = el("div", "seg");
+  root.setAttribute("role", "radiogroup");
+  root.setAttribute("aria-label", rotulo);
+  const botoes = new Map();
+  for (const o of opcoes) {
+    const b = el("button", "", o.rot);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", "false");
+    b.addEventListener("click", () => onPick(o.v));
+    botoes.set(o.v, b);
+    root.append(b);
+  }
+  return {
+    root,
+    set(valor) { for (const [v, b] of botoes) { b.setAttribute("aria-checked", String(v === valor)); b.tabIndex = v === valor ? 0 : -1; } },
+    lock(travado) { for (const b of botoes.values()) b.disabled = travado; },
+  };
+}
+
+function buildAudio(card) {
+  const d = card.audio = { data: null, busy: false };
+  const pan = el("div", "aba");
+  pan.append(el("p", "hint", "Ajustes desta quadra. Valem ao vivo, sem derrubar a transmissão, e ficam guardados. Ouça e ajuste: cada passo é reversível."));
+
+  d.estado = el("p", "nota");
+  d.estadoTxt = el("span");
+  d.estadoIco = el("span");
+  d.btnTentar = button("Tentar de novo", "secondary small", () => setAudio(card, { reducao_ruido: d.data.reducao_ruido, corte_agudos: d.data.corte_agudos }));
+  d.estado.append(d.estadoIco, d.estadoTxt, d.btnTentar);
+  d.estado.hidden = true;
+
+  const bloco = (ico, titulo, opcoes, campo) => {
+    const sec = el("section", "bloco");
+    const tit = el("div", "bloco-tit");
+    const h = el("h3");
+    h.append(icon(ico), document.createTextNode(titulo));
+    const tag = el("span", "tag", "carregando…");
+    tit.append(h, tag);
+    const seg = buildSegmented(titulo, opcoes, (v) => {
+      if (d.data && d.data[campo] === v && d.data.aplicado_ao_vivo !== false) return;   // já é o escolhido: não chama a API
+      setAudio(card, { [campo]: v });
+    });
+    const desc = el("p", "hint");
+    sec.append(tit, seg.root, desc);
+    return { sec, tag, seg, desc, opcoes };
+  };
+  d.corte = bloco("volume", "Corte de agudos", CORTE_OPCOES, "corte_agudos");
+  d.ruido = bloco("clock", "Redução de ruído", RUIDO_OPCOES, "reducao_ruido");
+  d.btnPadrao = button("Voltar ao padrão do servidor", "secondary", async () => {
+    await setAudio(card, { reducao_ruido: d.data.padrao.reducao_ruido, corte_agudos: d.data.padrao.corte_agudos });
+  });
+  pan.append(d.estado, d.corte.sec, d.ruido.sec, d.btnPadrao);
+  return pan;
+}
+
+async function loadAudio(card) {
+  const d = card.audio;
+  try {
+    d.data = await api(`/broadcast/${card.id}/audio`);
+  } catch (e) {
+    d.corte.tag.textContent = "erro ao carregar";
+    toast(e.message);
+    return;
+  }
+  renderAudio(card);
+}
+
+async function setAudio(card, corpo) {
+  const d = card.audio;
+  if (d.busy) return;
+  d.busy = true;
+  d.corte.seg.lock(true); d.ruido.seg.lock(true);
+  d.estadoTxt.textContent = "Aplicando…";
+  d.estado.className = "nota";
+  d.estado.hidden = false;
+  d.btnTentar.hidden = true;
+  try {
+    d.data = await api(`/broadcast/${card.id}/audio`, "PUT", corpo);
+    renderAudio(card);
+    if (d.data.no_ar && d.data.aplicado_ao_vivo) toast("Áudio ajustado ao vivo.", true);
+    else if (!d.data.no_ar) toast("Ajuste guardado: vale quando a transmissão for iniciada.", true);
+  } catch (e) {
+    toast(e.message);
+    await loadAudio(card);
+  } finally {
+    d.busy = false;
+    d.corte.seg.lock(false); d.ruido.seg.lock(false);
+  }
+}
+
+function renderAudio(card) {
+  const d = card.audio, data = d.data;
+  if (!data) return;
+  for (const [grupo, campo] of [[d.corte, "corte_agudos"], [d.ruido, "reducao_ruido"]]) {
+    const v = data[campo];
+    grupo.seg.set(v);
+    const op = grupo.opcoes.find((o) => o.v === v);
+    grupo.desc.textContent = op ? op.desc : "";
+    grupo.tag.textContent = v === data.padrao[campo] ? "padrão do servidor" : "personalizado";
+    grupo.tag.className = `tag ${v === data.padrao[campo] ? "" : "ok"}`.trim();
+  }
+  setDisabled(d.btnPadrao, data.corte_agudos === data.padrao.corte_agudos && data.reducao_ruido === data.padrao.reducao_ruido);
+  d.estado.hidden = false;
+  d.btnTentar.hidden = true;
+  if (!data.no_ar) {
+    d.estado.className = "nota";
+    d.estadoIco.replaceChildren(icon("clock"));
+    d.estadoTxt.textContent = "Quadra fora do ar: o ajuste vale quando a transmissão for iniciada.";
+  } else if (data.aplicado_ao_vivo) {
+    d.estado.className = "nota ok";
+    d.estadoIco.replaceChildren(icon("check"));
+    d.estadoTxt.textContent = "Aplicado ao vivo agora.";
+  } else {
+    d.estado.className = "nota warn";
+    d.estadoIco.replaceChildren(icon("alert"));
+    d.estadoTxt.textContent = "Guardado, mas o ffmpeg no ar não confirmou. Vale quando a transmissão for relançada.";
+    d.btnTentar.hidden = false;
+  }
+}
+
 // --- cartão: montagem e atualização -------------------------------------------------
+
+const ABAS = ["trans", "audio", "dest"];
 
 function buildTabs(card) {
   const tabs = el("div", "tabs");
   tabs.setAttribute("role", "tablist");
-  const make = (texto, ico) => {
+  const make = (texto, ico, aba) => {
     const b = el("button", "tab");
     b.type = "button";
     b.setAttribute("role", "tab");
     b.append(icon(ico), document.createTextNode(texto));
+    b.addEventListener("click", () => selectTab(card, aba));
     return b;
   };
-  card.tabTrans = make("Transmissão", "signal");
-  card.tabDest = make("Destino", "key");
-  card.tabTrans.addEventListener("click", () => selectTab(card, "trans"));
-  card.tabDest.addEventListener("click", () => selectTab(card, "dest"));
+  card.tabs = { trans: make("Transmissão", "signal", "trans"), audio: make("Áudio", "volume", "audio"), dest: make("Destino", "key", "dest") };
   tabs.addEventListener("keydown", (ev) => {
-    if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
-      const alvo = card.aba === "trans" ? "dest" : "trans";
-      selectTab(card, alvo);
-      (alvo === "dest" ? card.tabDest : card.tabTrans).focus();
-    }
+    if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
+    const passo = ev.key === "ArrowRight" ? 1 : -1;
+    const alvo = ABAS[(ABAS.indexOf(card.aba) + passo + ABAS.length) % ABAS.length];
+    selectTab(card, alvo);
+    card.tabs[alvo].focus();
   });
-  tabs.append(card.tabTrans, card.tabDest);
+  tabs.append(...ABAS.map((a) => card.tabs[a]));
   return tabs;
 }
 
 function selectTab(card, which) {
   card.aba = which;
-  const dest = which === "dest";
-  card.tabTrans.setAttribute("aria-selected", String(!dest));
-  card.tabDest.setAttribute("aria-selected", String(dest));
-  card.tabTrans.tabIndex = dest ? -1 : 0;
-  card.tabDest.tabIndex = dest ? 0 : -1;
-  card.panTrans.hidden = dest;
-  card.panDest.hidden = !dest;
-  if (dest) loadDestino(card);
+  const paineis = { trans: card.panTrans, audio: card.panAudio, dest: card.panDest };
+  for (const a of ABAS) {
+    card.tabs[a].setAttribute("aria-selected", String(a === which));
+    card.tabs[a].tabIndex = a === which ? 0 : -1;
+    paineis[a].hidden = a !== which;
+  }
+  if (which === "dest") loadDestino(card);
+  if (which === "audio") loadAudio(card);
 }
 
 function buildCard(quadra) {
@@ -660,17 +800,17 @@ function buildCard(quadra) {
   card.avisos = el("div", "avisos");
 
   card.panTrans = buildTransmissao(card);
+  card.panAudio = buildAudio(card);
   card.panDest = buildDestino(card);
-  card.root.append(head, card.chips, card.progress, card.avisos, buildTabs(card), card.panTrans, card.panDest);
-  selectTabInicial(card);
-  return card;
-}
-
-function selectTabInicial(card) {
-  card.tabTrans.setAttribute("aria-selected", "true");
-  card.tabDest.setAttribute("aria-selected", "false");
-  card.tabDest.tabIndex = -1;
+  card.root.append(head, card.chips, card.progress, card.avisos, buildTabs(card), card.panTrans, card.panAudio, card.panDest);
+  for (const a of ABAS) {   // estado inicial das abas, sem disparar carregamento
+    const aberta = a === "trans";
+    card.tabs[a].setAttribute("aria-selected", String(aberta));
+    card.tabs[a].tabIndex = aberta ? 0 : -1;
+  }
+  card.panAudio.hidden = true;
   card.panDest.hidden = true;
+  return card;
 }
 
 function applyPlacar(card, p) {
@@ -786,6 +926,10 @@ function updateCard(card, q) {
   }
   renderAvisos(card, avisos);
   applyLock(card);
+  // Aba Áudio aberta: se outro cliente mexeu nos ajustes, ou a transmissão ligou/desligou, recarrega.
+  const a = card.audio;
+  if (card.aba === "audio" && !a.busy && a.data && (a.data.no_ar !== p.no_ar || a.data.corte_agudos !== p.audio.corte_agudos ||
+      a.data.reducao_ruido !== p.audio.reducao_ruido)) loadAudio(card);
 }
 
 // --- topo e laço principal ----------------------------------------------------------

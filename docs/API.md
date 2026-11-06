@@ -25,6 +25,7 @@ A documentação interativa (Swagger), gerada pelo FastAPI, fica em
 - [Subir a live no YouTube](#subir-a-live-no-youtube)
 - [Configurar o destino da transmissão (stream key e RTMP)](#configurar-o-destino-da-transmissão-stream-key-e-rtmp)
 - [Transmissão com placar](#transmissão-com-placar-broadcast)
+  - [Áudio: corte de agudos e redução de ruído](#áudio-corte-de-agudos-e-redução-de-ruído)
 - [Estado geral](#estado-geral-get-status)
 - [Painel web](#painel-web)
 - [Consultar replays](#consultar-replays)
@@ -53,6 +54,7 @@ A documentação interativa (Swagger), gerada pelo FastAPI, fica em
 | `PUT /broadcast/{quadra_id}/nomes` | `Bearer` | Troca os nomes das duplas |
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` | `Bearer` | Sobe/desce o volume com a live no ar |
 | `PUT /broadcast/{quadra_id}/volume` | `Bearer` | Define o volume |
+| `GET`/`PUT /broadcast/{quadra_id}/audio` | `Bearer` | Lê e troca o corte de agudos e a redução de ruído (valem ao vivo, sem relançar) |
 | `GET /broadcast`, `GET /broadcast/{quadra_id}` | `Bearer` | Estado (placar, nomes, volume, tempo no ar) |
 | `GET /status` | `Bearer` ou sessão do painel | Uma linha por quadra com os dois modos (direta e placar) |
 | `GET /painel` | página pública; login dentro | Painel web de controle da transmissão (porta 8000, a mesma da API) |
@@ -595,6 +597,7 @@ Todas devolvem o [objeto de estado](#objeto-de-estado) (o `start`/`stop` somam `
 | `PUT /broadcast/{quadra_id}/nomes` | `nome_a`, `nome_b` | Troca os nomes (até 14 caracteres, maiúsculas) |
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` | `?passo=10` (%) | Sobe/desce o volume |
 | `PUT /broadcast/{quadra_id}/volume` | `{"nivel": 150}` (%) | Define o volume |
+| `GET`/`PUT /broadcast/{quadra_id}/audio` | `{"corte_agudos": "medio", "reducao_ruido": "medio"}` (um ou os dois) | [Áudio](#áudio-corte-de-agudos-e-redução-de-ruído): vale ao vivo |
 
 As rotas de placar, nomes e volume funcionam **com a transmissão fora do ar**
 também: o valor fica gravado e vale quando ela for ligada com `reset: false`.
@@ -613,6 +616,7 @@ também: o valor fica gravado e vale quando ela for ligada com `reset: false`.
     "b": { "pontos": 1, "sets": 0 }
   },
   "volume": 100,
+  "audio": { "reducao_ruido": "medio", "corte_agudos": "medio" },
   "no_ar_ha_segundos": 312,
   "encerra_em_segundos": 6888,
   "reinicios": 0,
@@ -630,6 +634,7 @@ também: o valor fica gravado e vale quando ela for ligada com `reset: false`.
 | `placar.{a,b}.pontos` | int | Pontos no set atual |
 | `placar.{a,b}.sets` | int | Sets ganhos |
 | `volume` | int | % do volume da câmera (100 = original, 0 = mudo) |
+| `audio` | objeto | Ajustes de áudio desta quadra: `reducao_ruido` e `corte_agudos` (veja [Áudio](#áudio-corte-de-agudos-e-redução-de-ruído)) |
 | `no_ar_ha_segundos` | int ou `null` | Há quanto tempo está no ar; `null` fora do ar |
 | `encerra_em_segundos` | int ou `null` | Quanto falta para o prazo `LIVE_MAX_SECONDS`; `null` fora do ar ou sem limite |
 | `reinicios` | int | Quantas vezes a API relançou o ffmpeg desta transmissão |
@@ -997,15 +1002,83 @@ o som da câmera; `null` = ainda não sondado ou transmissão readotada após re
 da API). O volume só tem efeito quando há áudio da câmera. Dica: um volume 0 deixa
 a live muda; `start` com `reset=true` (padrão) volta o volume a 100%.
 
-**Redução de ruído do áudio.** Por padrão a transmissão com placar aplica ao áudio da câmera, antes do volume,
-um corte do grave (zumbido e vento no microfone, abaixo de 100 Hz) e uma redução de ruído de fundo (`afftdn`),
-no nível **médio**. O nível vem de `AUDIO_DENOISE` (`off`, `leve`, `medio` ou `forte`) no `.env` do servidor e vale
-quando a transmissão é **iniciada ou relançada**: uma que já está no ar continua como subiu. Custo medido no
-comando real: cerca de **+1% de um núcleo por transmissão**. Não afeta a **live direta** (o vídeo sai da câmera,
-sem passar pelo servidor), nem os replays, nem o volume (o filtro roda antes dele, então atua sempre no nível
-original da câmera). Sem áudio da câmera (trilha de silêncio) nada é aplicado, e, se o ffmpeg da máquina não tiver o
-filtro, a live sobe sem ele e o log avisa. O nível médio é discreto de propósito: rebaixa o ruído de fundo
-sem mexer em batidas, bola e vozes. Para ouvir a diferença antes de mudar, compare os níveis em amostras reais.
+### Áudio: corte de agudos e redução de ruído
+
+O áudio da câmera passa, antes do volume, por uma cadeia fixa de filtros que tem **dois ajustes por quadra**,
+ligados por padrão no nível **médio**:
+
+| Ajuste | Níveis | O que faz |
+|---|---|---|
+| `corte_agudos` | `off`, `suave` (5 kHz), `medio` (4 kHz), `forte` (4 kHz íngreme), `maximo` (3,5 kHz íngreme) | Tira o chiado agudo. Medido em áudio real: reduz ~3, ~6,5, ~11 e ~16 dB do agudo (4–8 kHz) nos quatro níveis, e **a voz e o som até 3,4 kHz não mudam**. O preço é o som ficar mais abafado |
+| `reducao_ruido` | `off`, `leve`, `medio`, `forte` | Corta o zumbido grave (< 100 Hz) e rebaixa o ruído de fundo (`afftdn`). É discreta de propósito: não tira chiado misturado com o som, e o nível `forte` pode deixar um som metálico |
+
+O padrão de cada quadra vem de `AUDIO_CORTE_AGUDOS` e `AUDIO_DENOISE` no `.env` (os dois `medio`); depois que alguém
+ajusta uma quadra, o valor fica **gravado** e sobrevive a reinício da API. Custo medido no comando real: ~+1% de um
+núcleo por transmissão. Não afeta a **live direta** (o vídeo sai da câmera, sem passar pelo servidor) nem os replays.
+Sem áudio da câmera nada é aplicado, e se o ffmpeg da máquina não tiver o filtro `afftdn` a live sobe sem ele (o corte
+de agudos continua) e o log avisa.
+
+#### Ver e trocar: `GET` e `PUT /broadcast/{quadra_id}/audio`
+
+```bash
+curl -s http://SERVIDOR:8000/broadcast/loc1-quadra1/audio -H "Authorization: Bearer SEU_TOKEN"
+```
+
+```json
+{
+  "quadra_id": "loc1-quadra1",
+  "reducao_ruido": "medio",
+  "corte_agudos": "medio",
+  "padrao": { "reducao_ruido": "medio", "corte_agudos": "medio" },
+  "niveis": {
+    "reducao_ruido": ["off", "leve", "medio", "forte"],
+    "corte_agudos": ["off", "suave", "medio", "forte", "maximo"]
+  },
+  "no_ar": true,
+  "aplicado_ao_vivo": true
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `reducao_ruido`, `corte_agudos` | Os ajustes em vigor desta quadra (o gravado, ou o padrão do servidor) |
+| `padrao` | O padrão do servidor (`AUDIO_DENOISE` e `AUDIO_CORTE_AGUDOS`) |
+| `niveis` | Os valores aceitos |
+| `no_ar` | A transmissão com placar desta quadra está no ar |
+| `aplicado_ao_vivo` | `null` com a quadra fora do ar (vale ao iniciar). Com ela no ar: `true` = o ffmpeg **confirmou** o ajuste; `false` = não confirmou (o ajuste fica gravado e vale ao relançar) |
+
+`PUT` troca o que vier no corpo (pelo menos um campo; o outro não muda; `null` é recusado). **Com a transmissão no ar
+vale na hora, sem relançar nem cortar a live**: a API manda ao ffmpeg só o que mudou e espera a confirmação dele
+(cada comando leva ~0,1 a 0,5 s, então a resposta pode demorar um ou dois segundos). Fora do ar só grava.
+
+```bash
+# corte de agudos médio (4 kHz): o ponto de partida recomendado
+curl -s -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/audio \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"corte_agudos": "medio"}'
+
+# mais firme, e sem a redução de ruído
+curl -s -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/audio \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"corte_agudos": "forte", "reducao_ruido": "off"}'
+```
+
+Resposta `200`: o mesmo objeto do `GET` com `status` na frente (`"atualizada"` ou `"sem_mudanca"`). Repetir o `PUT`
+com o mesmo valor quando `aplicado_ao_vivo` veio `false` **tenta aplicar de novo**.
+
+| Código | Quando | `detail` de exemplo |
+|---|---|---|
+| `401` / `403` / `503` | Token ausente/errado; cookie sem `X-Painel`; nenhum token | ver [Autenticação](#autenticação) |
+| `404` | `quadra_id` não está em `config/cameras.json` | `quadra_id 'x' não está em .../cameras.json.` |
+| `422` | Nível desconhecido | `corte_agudos deve ser um de: off, suave, medio, forte, maximo.` |
+| `422` | Corpo sem nenhum campo | `informe reducao_ruido e/ou corte_agudos.` |
+| `422` | Campo `null` | `corte_agudos não pode ser nulo (omita o campo para não mudar).` |
+| `422` | Tipo errado (`detail` é **lista**) | ver [Formato dos erros](#formato-dos-erros) |
+
+O campo `audio` (`{"reducao_ruido", "corte_agudos"}`) também vem no [objeto de estado](#objeto-de-estado) de toda
+rota de `/broadcast` e no `GET /status`. Uma transmissão que **subiu antes desta versão** não tem os filtros que aceitam a
+troca ao vivo: a API detecta isso ao reiniciar (`aplicado_ao_vivo: false`) e o ajuste vale quando ela for relançada.
+A caixa do placar e o áudio são decididos no ffmpeg de cada quadra, então o ajuste de uma quadra não afeta as outras.
 
 ---
 
@@ -1115,6 +1188,13 @@ indicador de conexão com a API. Cada quadra é um cartão com **duas abas**:
 - Avisos: quadra sem stream key (com atalho para cadastrá-la), limite de 2 transmissões,
   ffmpeg tentando conectar, câmera sem resposta, key compartilhada com outra quadra no ar,
   conflito entre os dois modos.
+
+**Aba Áudio** (usa [`/broadcast/{id}/audio`](#áudio-corte-de-agudos-e-redução-de-ruído)): dois controles de escolha
+única, *Corte de agudos* (Off, Suave, Médio, Forte, Máximo) e *Redução de ruído* (Off, Leve, Média, Forte), cada um com a
+descrição do nível escolhido e a etiqueta "padrão do servidor" ou "personalizado". Clicar aplica **na hora**, sem
+relançar a transmissão. Uma nota diz o estado: *Aplicado ao vivo agora* (o ffmpeg confirmou), *Quadra fora do ar* (vale ao
+iniciar) ou *não confirmou* (guardado, vale ao relançar; botão *Tentar de novo*). *Voltar ao padrão do servidor* restaura
+os dois. Se outra pessoa mexer, a aba se atualiza sozinha.
 
 **Aba Destino** (usa as rotas [`/quadras/{id}/youtube`](#configurar-o-destino-da-transmissão-stream-key-e-rtmp)):
 

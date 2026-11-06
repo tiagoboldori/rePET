@@ -78,6 +78,7 @@ def _new_state() -> dict:
         "nomes": dict(DEFAULT_NAMES),
         "placar": {s: {"pontos": 0, "sets": 0} for s in SIDES},
         "volume": 100,
+        "audio": {},  # ajustes de áudio gravados desta quadra (vazio = usa o padrão do servidor)
         "pid": None,
         "inicio": None,
         "prazo": None,
@@ -107,6 +108,12 @@ def _sanitize(saved) -> dict | None:
                 st["placar"][side][field] = max(0, _int(score.get(field)))
     st["no_ar"] = saved.get("no_ar") is True
     st["volume"] = max(0, min(_int(saved.get("volume"), 100), config.BROADCAST_VOLUME_MAX))
+    audio = saved.get("audio")
+    if isinstance(audio, dict):
+        if audio.get("reducao_ruido") in REDUCAO_RUIDO_NIVEIS:
+            st["audio"]["reducao_ruido"] = audio["reducao_ruido"]
+        if audio.get("corte_agudos") in CORTE_AGUDOS_NIVEIS:
+            st["audio"]["corte_agudos"] = audio["corte_agudos"]
     st["pid"] = saved["pid"] if _int(saved.get("pid"), 0) > 0 else None
     st["inicio"], st["prazo"] = _num(saved.get("inicio")), _num(saved.get("prazo"))
     return st
@@ -217,21 +224,31 @@ def _video_filters(quadra_id: str) -> list[str]:
     return video
 
 
-# Redução de ruído do áudio da câmera (mono 16 kHz), medida em áudio real das quadras: o corte do grave tira o
-# zumbido contínuo e o afftdn (com rastreio do ruído) rebaixa o ruído de fundo sem mexer em batidas e vozes altas.
-# Custo medido: ~+1% de um núcleo por transmissão. Roda ANTES do volume (atua sempre no nível original da câmera)
-# e ANTES do aresample para 44,1 kHz estéreo (processa 5,5x menos amostras).
-DENOISE_LEVELS = {
-    "leve": "highpass=f=100,afftdn=nr=10:nf=-50:tn=1",
-    "medio": "highpass=f=100,afftdn=nr=14:nf=-45:tn=1",
-    "forte": "highpass=f=100,afftdn=nr=25:nf=-35:tn=1",
-}
+# --- Áudio da transmissão: redução de ruído e corte de agudos ----------------------------------------------------
+# O áudio da câmera (mono 16 kHz) passa, antes do volume, por uma cadeia FIXA de filtros nomeados:
+#   aresample=16000 -> highpass@hp -> afftdn@dn -> lowpass@lp1 -> lowpass@lp2
+# Os níveis só mudam parâmetros (mix, om, frequência), então podem ser trocados COM A TRANSMISSÃO NO AR por comandos do
+# ffmpeg (o mesmo canal do volume), sem relançar. "off" deixa o filtro transparente (mix=0 / om=i), nunca o remove.
+# Medido em áudio real das quadras: a voz e o som até 3,4 kHz não mudam com nenhum nível; custo ~+1% de um núcleo.
+# O afftdn atua sobre ruído estacionário (e só rebaixa uns dB; no nível forte cria som metálico); o que realmente
+# reduz o chiado agudo é o corte de agudos (lowpass).
+REDUCAO_RUIDO_NIVEIS = ("off", "leve", "medio", "forte")
+CORTE_AGUDOS_NIVEIS = ("off", "suave", "medio", "forte", "maximo")
+_RUIDO = {"leve": (10, -50), "medio": (14, -45), "forte": (25, -35)}  # (nr, nf) do afftdn, em dB
+_CORTE = {"suave": (5000,), "medio": (4000,), "forte": (4000, 4000), "maximo": (3500, 3500)}  # Hz de cada estágio (2 polos)
+_LEVEL_ALIASES = {"médio": "medio", "máximo": "maximo", "desligado": "off", "desligada": "off", "nao": "off",
+                  "não": "off", "0": "off", "false": "off"}
+_BYPASS_HZ = 7900  # frequência de repouso dos lowpass em modo transparente (abaixo de Nyquist a 16 kHz)
+AUDIO_APPLY_TIMEOUT = 2.0  # espera mínima pelas respostas do ffmpeg a uma troca ao vivo...
+AUDIO_APPLY_PER_COMMAND = 0.7  # ...mais isto por comando (o ffmpeg processa um a cada ~0,5 s)
+_REPLY_RE = re.compile(rb"Command reply for stream \d+: ret:(-?\d+)")
 _denoise_filter_ok: bool | None = None
+_audio_live: dict[str, bool] = {}  # quadra -> o ffmpeg no ar está com os ajustes gravados? (só vale com a quadra no ar)
 
 
 def _denoise_available() -> bool:
     """O ffmpeg desta máquina tem o filtro afftdn? (checa uma vez). Sem ele a live seguiria falhando ao subir, então
-    é melhor transmitir sem o filtro e avisar. Na dúvida (não conseguiu perguntar), não aplica."""
+    é melhor transmitir sem esse filtro e avisar. Na dúvida (não conseguiu perguntar), não usa."""
     global _denoise_filter_ok
     if _denoise_filter_ok is None:
         try:
@@ -241,17 +258,75 @@ def _denoise_available() -> bool:
             _denoise_filter_ok = False
         if not _denoise_filter_ok:
             print("[broadcast] aviso: este ffmpeg não tem o filtro afftdn (ou não respondeu); "
-                  "a redução de ruído do áudio fica desligada.")
+                  "a redução de ruído do áudio fica desligada (o corte de agudos continua valendo).")
     return _denoise_filter_ok
 
 
-def _denoise_chain() -> str | None:
-    """Cadeia de filtros do nível configurado em AUDIO_DENOISE, ou None se desligada/indisponível."""
-    chain = DENOISE_LEVELS.get(config.AUDIO_DENOISE)
-    return chain if chain and _denoise_available() else None
+def audio_defaults() -> dict:
+    """Padrão do servidor (AUDIO_DENOISE e AUDIO_CORTE_AGUDOS), usado por toda quadra sem ajuste gravado."""
+    return {"reducao_ruido": config.AUDIO_DENOISE, "corte_agudos": config.AUDIO_CORTE_AGUDOS}
+
+
+def _audio_of(st: dict) -> dict:
+    """Ajustes de áudio efetivos de uma quadra: o que foi gravado (se válido), senão o padrão do servidor."""
+    saved = st.get("audio") if isinstance(st.get("audio"), dict) else {}
+    out = audio_defaults()
+    if saved.get("reducao_ruido") in REDUCAO_RUIDO_NIVEIS:
+        out["reducao_ruido"] = saved["reducao_ruido"]
+    if saved.get("corte_agudos") in CORTE_AGUDOS_NIVEIS:
+        out["corte_agudos"] = saved["corte_agudos"]
+    return out
+
+
+def _audio_chain(settings: dict | None = None) -> str:
+    """Cadeia de filtros de áudio com os ajustes dados, antes do volume. Sempre completa (filtros nomeados)."""
+    s = settings or audio_defaults()
+    on = s["reducao_ruido"] != "off"
+    nr, nf = _RUIDO.get(s["reducao_ruido"], _RUIDO["medio"])
+    stages = _CORTE.get(s["corte_agudos"], ())
+    parts = ["aresample=16000"]  # garante o 16 kHz que os cortes assumem (a câmera já entrega assim; é um no-op)
+    if _denoise_available():
+        parts += [f"highpass@hp=f=100:mix={int(on)}", f"afftdn@dn=nr={nr}:nf={nf}:tn=1:om={'o' if on else 'i'}"]
+    for i, name in enumerate(("lp1", "lp2")):
+        f = stages[i] if i < len(stages) else None
+        parts.append(f"lowpass@{name}=f={f or _BYPASS_HZ}:mix={1 if f else 0}")
+    return ",".join(parts)
+
+
+def _audio_commands(settings: dict, previous: dict | None = None) -> list[str]:
+    """Comandos do ffmpeg (sem o 'c' do prompt) que levam uma cadeia no ar aos ajustes dados.
+
+    O ffmpeg processa UM comando a cada ~0,5 s, então, quando se sabe os ajustes atuais (`previous`), manda só o que
+    mudou. Sem `previous` manda tudo. O corte de agudos vai primeiro: é o que mais se ouve."""
+    cmds: list[str] = []
+    stages = _CORTE.get(settings["corte_agudos"], ())
+    old_stages = _CORTE.get(previous["corte_agudos"], ()) if previous else None
+    for i, name in enumerate(("lp1", "lp2")):
+        new = stages[i] if i < len(stages) else None
+        old = (old_stages[i] if i < len(old_stages) else None) if old_stages is not None else "?"
+        if old == new:
+            continue
+        if new is None:
+            cmds.append(f"lowpass@{name} -1 mix 0")
+        elif old in (None, "?"):
+            cmds += [f"lowpass@{name} -1 frequency {new}", f"lowpass@{name} -1 mix 1"]
+        else:  # já estava ligado em outra frequência: só troca a frequência
+            cmds.append(f"lowpass@{name} -1 frequency {new}")
+    if _denoise_available() and (previous is None or previous["reducao_ruido"] != settings["reducao_ruido"]):
+        new_on = settings["reducao_ruido"] != "off"
+        old_on = previous is not None and previous["reducao_ruido"] != "off"
+        if new_on:
+            nr, nf = _RUIDO[settings["reducao_ruido"]]
+            if not old_on:
+                cmds += [f"highpass@hp -1 mix 1", f"afftdn@dn -1 om o"]
+            cmds += [f"afftdn@dn -1 nr {nr}", f"afftdn@dn -1 nf {nf}"]
+        else:
+            cmds += ["afftdn@dn -1 om i", "highpass@hp -1 mix 0"]
+    return cmds
 
 
 def _filter_graph(quadra_id: str, volume: int, audio_input: str = "0:a", denoise: str | None = None) -> str:
+    """Grafo completo: vídeo com o placar e áudio. `denoise` é a cadeia de áudio (antes do volume), se houver."""
     pre = f"{denoise}," if denoise else ""
     audio = (
         f"{pre}volume@vol={volume / 100:.3f}:eval=frame,alimiter=limit=0.95,"
@@ -279,7 +354,7 @@ def _probe_audio(input_url: str) -> bool:
 
 def _ffmpeg_cmd(
     quadra_id: str, input_url: str, stream_key: str, volume: int, has_audio: bool = True,
-    rtmp_url: str | None = None,
+    rtmp_url: str | None = None, audio: dict | None = None,
 ) -> list[str]:
     bitrate = config.BROADCAST_BITRATE
     # Câmera sem áudio: sem isto o ffmpeg sairia com "matches no streams" e o supervisor
@@ -292,7 +367,7 @@ def _ffmpeg_cmd(
         "-rtsp_transport", "tcp", "-timeout", "15000000",
         "-i", input_url, *silence,
         "-filter_complex", _filter_graph(
-            quadra_id, volume, "0:a" if has_audio else "1:a", _denoise_chain() if has_audio else None
+            quadra_id, volume, "0:a" if has_audio else "1:a", _audio_chain(audio) if has_audio else None
         ),
         "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", config.BROADCAST_PRESET,
@@ -334,12 +409,14 @@ def _spawn(quadra_id: str, camera: dict, runtime: _Runtime, has_audio: bool) -> 
     runtime.has_audio = has_audio
     if not has_audio:
         print(f"[broadcast] {quadra_id}: a câmera não tem áudio; a transmissão vai com silêncio.")
-    elif _denoise_chain():
-        print(f"[broadcast] {quadra_id}: redução de ruído do áudio: {config.AUDIO_DENOISE}.")
+    audio = _audio_of(st)
+    if has_audio:
+        print(f"[broadcast] {quadra_id}: áudio: redução de ruído {audio['reducao_ruido']}, corte de agudos {audio['corte_agudos']}.")
     cmd = _ffmpeg_cmd(
         quadra_id, camera["input_url"], camera["youtube_stream_key"], st["volume"], has_audio,
-        # Só repassa quando a quadra tem URL própria: sem ela a chamada é idêntica à de antes.
+        # Só repassa o que difere do padrão: sem URL própria e com o áudio no padrão a chamada é idêntica à de antes.
         **({"rtmp_url": camera["rtmp_url"]} if camera.get("rtmp_url") else {}),
+        **({"audio": audio} if audio != audio_defaults() else {}),
     )
     # O FIFO é aberto em leitura+escrita: o ffmpeg nunca vê EOF no stdin, mesmo
     # que a API reinicie, e a API reabre só para escrita quando precisa.
@@ -356,6 +433,7 @@ def _spawn(quadra_id: str, camera: dict, runtime: _Runtime, has_audio: bool) -> 
     runtime.last_spawn = runtime.last_frame_change = time.time()
     runtime.last_frame = -1
     st["pid"] = runtime.proc.pid
+    _audio_live[quadra_id] = has_audio  # subiu com a cadeia montada a partir dos ajustes gravados
     _persist()
 
 
@@ -668,6 +746,8 @@ def resume(cameras: dict[str, dict]) -> dict:
                 summary["relancadas"].append(quadra_id)
             _launch_supervisor(quadra_id, camera, runtime)  # se não está vivo, ele relança
         _persist()
+    for quadra_id in summary["readotadas"] + summary["orfas_adotadas"]:
+        _sync_audio(quadra_id)  # fora do lock: espera as respostas do ffmpeg
     return summary
 
 
@@ -763,6 +843,105 @@ def change_volume(quadra_id: str, direction: int, step: int | None = None) -> di
         return set_volume(quadra_id, _st(quadra_id)["volume"] + direction * abs(step))
 
 
+def _normalize_level(value, niveis: tuple, campo: str) -> str:
+    level = str(value).strip().lower()
+    level = _LEVEL_ALIASES.get(level, level)
+    if level not in niveis:
+        raise BroadcastError(f"{campo} deve ser um de: {', '.join(niveis)}.", 422)
+    return level
+
+
+def _apply_audio_live(quadra_id: str, settings: dict, previous: dict | None = None) -> bool:
+    """Leva o ffmpeg que está no ar aos ajustes de áudio, sem relançar, e CONFIRMA: o ffmpeg responde a cada comando, na
+    ordem, com `ret:0` (aplicou), `ret:-38` (o filtro não existe: transmissão que subiu antes desta cadeia) ou
+    `ret:-34` (valor inválido). True só se todas as respostas chegaram e foram ret:0."""
+    cmds = _audio_commands(settings, previous)
+    if not cmds:
+        return True  # nada a mudar na cadeia no ar
+    log_path = config.BROADCAST_LOG_DIR / f"broadcast_{quadra_id}.log"
+    try:
+        offset = log_path.stat().st_size
+    except OSError:
+        offset = 0
+    with _lock:
+        if not _send(quadra_id, "".join(f"c{c}\n" for c in cmds)):
+            return False
+    deadline = time.time() + AUDIO_APPLY_TIMEOUT + AUDIO_APPLY_PER_COMMAND * len(cmds)
+    replies: list[int] = []
+    while True:
+        try:
+            with open(log_path, "rb") as fh:
+                fh.seek(offset)
+                replies = [int(x) for x in _REPLY_RE.findall(fh.read())]
+        except OSError:
+            replies = []
+        if len(replies) >= len(cmds) or time.time() >= deadline:
+            break
+        time.sleep(0.1)
+    return len(replies) >= len(cmds) and all(r == 0 for r in replies[: len(cmds)])
+
+
+def audio_view(quadra_id: str) -> dict:
+    """Ajustes de áudio da quadra e se o ffmpeg que está no ar já os usa (`aplicado_ao_vivo`; None com a quadra fora do ar)."""
+    with _lock:
+        st = _st(quadra_id)
+        return {
+            "quadra_id": quadra_id,
+            **_audio_of(st),
+            "padrao": audio_defaults(),
+            "niveis": {"reducao_ruido": list(REDUCAO_RUIDO_NIVEIS), "corte_agudos": list(CORTE_AGUDOS_NIVEIS)},
+            "no_ar": st["no_ar"],
+            "aplicado_ao_vivo": _audio_live.get(quadra_id, False) if st["no_ar"] else None,
+        }
+
+
+def set_audio(quadra_id: str, reducao_ruido: str | None = None, corte_agudos: str | None = None) -> tuple[dict, bool]:
+    """Grava os ajustes de áudio da quadra (o que não vier não muda) e, com a transmissão no ar, aplica na hora.
+
+    Devolve (visão, mudou?). Fora do ar só grava (vale ao iniciar). Se a troca ao vivo não for confirmada, o ajuste
+    fica gravado mesmo assim (vale ao relançar) e `aplicado_ao_vivo` vem False; repetir o PUT tenta de novo."""
+    if reducao_ruido is None and corte_agudos is None:
+        raise BroadcastError("informe reducao_ruido e/ou corte_agudos.", 422)
+    new = {}
+    if reducao_ruido is not None:
+        new["reducao_ruido"] = _normalize_level(reducao_ruido, REDUCAO_RUIDO_NIVEIS, "reducao_ruido")
+    if corte_agudos is not None:
+        new["corte_agudos"] = _normalize_level(corte_agudos, CORTE_AGUDOS_NIVEIS, "corte_agudos")
+    with _lock:
+        st = _st(quadra_id)
+        before = _audio_of(st)
+        after = {**before, **new}
+        stored = st.get("audio") if isinstance(st.get("audio"), dict) else {}
+        pinned = any(stored.get(k) != v for k, v in new.items())  # gravar explicitamente também conta (fixa o valor)
+        if pinned:
+            st["audio"] = {**stored, **new}
+            _persist()
+        changed = after != before
+        in_sync = _audio_live.get(quadra_id) is True  # o ffmpeg no ar está exatamente em `before`: dá para mandar só o delta
+        retry = _audio_live.get(quadra_id) is False
+        on_air = st["no_ar"]
+    if on_air and (changed or retry):
+        ok = _apply_audio_live(quadra_id, after, before if in_sync else None)  # fora do lock: espera as respostas
+        with _lock:
+            _audio_live[quadra_id] = ok
+    return audio_view(quadra_id), changed or pinned
+
+
+def _sync_audio(quadra_id: str) -> None:
+    """Depois de readotar um ffmpeg (a API reiniciou), manda os ajustes gravados: garante que ele os usa e descobre se
+    subiu com uma cadeia antiga, sem os filtros nomeados (aí fica `aplicado_ao_vivo: false` até relançar)."""
+    with _lock:
+        st = _st(quadra_id)
+        settings, on_air = _audio_of(st), st["no_ar"]
+    if on_air:
+        ok = _apply_audio_live(quadra_id, settings)
+        with _lock:
+            _audio_live[quadra_id] = ok
+        if not ok:
+            print(f"[broadcast] {quadra_id}: o ffmpeg readotado não aceitou os ajustes de áudio ao vivo "
+                  "(subiu com a cadeia antiga?); valem quando a transmissão for relançada.")
+
+
 def snapshot(quadra_id: str) -> dict:
     with _lock:
         st = _st(quadra_id)
@@ -774,6 +953,7 @@ def snapshot(quadra_id: str) -> dict:
             "nomes": dict(st["nomes"]),
             "placar": {s: dict(st["placar"][s]) for s in SIDES},
             "volume": st["volume"],
+            "audio": _audio_of(st),
             "no_ar_ha_segundos": round(now - st["inicio"]) if st["inicio"] else None,
             "encerra_em_segundos": max(round(st["prazo"] - now), 0) if st["prazo"] else None,
             "reinicios": runtime.restarts if runtime else 0,

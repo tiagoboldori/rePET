@@ -318,7 +318,36 @@ curl -s -X POST $BASE/broadcast/$Q/stop -H "$A"
 o valor). `ponto`, `set` e `volume/up|down` **não são idempotentes**: depois de um timeout, consulte o
 estado antes de repetir. O placar aparece numa caixa **grená** no canto inferior esquerdo.
 
-#### 4. Live direta (sem placar, a câmera é quem transmite)
+#### 4. Ajustar o áudio (chiado agudo e ruído de fundo), ao vivo
+
+Cada quadra tem dois ajustes, ligados por padrão no nível **médio** e guardados por quadra: `corte_agudos`
+(`off`, `suave`, `medio`, `forte`, `maximo`: tira o chiado agudo; a voz até 3,4 kHz não muda, o som só fica mais abafado
+conforme o nível) e `reducao_ruido` (`off`, `leve`, `medio`, `forte`: corta o grave e rebaixa o ruído de fundo). Com a
+transmissão no ar a troca vale **na hora, sem relançar**; fora do ar fica guardada para quando ela subir.
+
+```bash
+# ver os ajustes da quadra (e se o ffmpeg no ar já os usa: aplicado_ao_vivo)
+curl -s $BASE/broadcast/loc1-quadra1/audio -H "Authorization: Bearer $TOKEN"
+# {"quadra_id":"loc1-quadra1","reducao_ruido":"medio","corte_agudos":"medio",
+#  "padrao":{"reducao_ruido":"medio","corte_agudos":"medio"},"niveis":{...},"no_ar":true,"aplicado_ao_vivo":true}
+
+# ainda há chiado agudo: corte mais firme (4 kHz íngreme). Só o que vier no corpo muda
+curl -s -X PUT $BASE/broadcast/loc1-quadra1/audio \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"corte_agudos": "forte"}'
+# {"status":"atualizada","reducao_ruido":"medio","corte_agudos":"forte","no_ar":true,"aplicado_ao_vivo":true,...}
+
+# voltar ao ponto de partida recomendado
+curl -s -X PUT $BASE/broadcast/loc1-quadra1/audio \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"corte_agudos": "medio", "reducao_ruido": "medio"}'
+```
+
+`aplicado_ao_vivo: false` quer dizer que o ffmpeg não confirmou (ajuste guardado, vale ao relançar): repita o `PUT` para
+tentar de novo. Custo medido: ~+1% de um núcleo por transmissão. Não vale para a live direta (sai da câmera) nem para os
+replays. Detalhes em [`docs/API.md`](docs/API.md#áudio-corte-de-agudos-e-redução-de-ruído).
+
+#### 5. Live direta (sem placar, a câmera é quem transmite)
 
 ```bash
 curl -s -X POST $BASE/live/loc1-quadra1 -H "Authorization: Bearer $TOKEN"
@@ -331,7 +360,7 @@ curl -s -X POST $BASE/live/loc1-quadra1/stop -H "Authorization: Bearer $TOKEN"
 Para saber se está no ar, prefira `direta.no_ar` do `/status`: o `GET /live/{id}` consulta a câmera na
 hora (pode levar ~10 s).
 
-#### 5. Replays: gravar, achar e baixar
+#### 6. Replays: gravar, achar e baixar
 
 ```bash
 # grava (é o que o botão físico chama; sem autenticação e sem corpo). Timeout generoso: 15 s
@@ -349,7 +378,7 @@ curl -o replay.mp4 $BASE/api/replays/loc1-quadra1_20261027100537/media
 
 Uma segunda gravação na mesma quadra antes de 15 s responde `429`.
 
-#### 6. Erros que você vai encontrar
+#### 7. Erros que você vai encontrar
 
 O erro vem como `{"detail": "mensagem em português"}`; a única exceção é a validação automática
 (`422`), em que `detail` é uma **lista**.
@@ -366,7 +395,7 @@ O erro vem como `{"detail": "mensagem em português"}`; a única exceção é a 
 | `502` | A câmera não respondeu | Verificar a câmera e tentar de novo |
 | `429` | Replay repetido em menos de 15 s | Esperar |
 
-#### 7. Em Python
+#### 8. Em Python
 
 ```python
 import os
@@ -408,6 +437,7 @@ Público (sem autenticação):
 | `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Desliga a live (o `POST` é para quem só consegue fazer POST) |
 | `GET /quadras/{quadra_id}/youtube` | Destino da transmissão da quadra: `tem_stream_key`, últimos 4 caracteres da key (esta rota nunca a mostra inteira), `rtmp_url` efetiva e hosts permitidos |
 | `GET` / `PUT /quadras/{quadra_id}/youtube/key` | Lê (a key **inteira**) e troca só a stream key. Cada leitura é registrada no log |
+| `GET` / `PUT /broadcast/{quadra_id}/audio` | Lê e troca o corte de agudos e a redução de ruído da quadra; valem **ao vivo** (sem relançar) e `aplicado_ao_vivo` diz se o ffmpeg confirmou |
 | `GET` / `PUT /quadras/{quadra_id}/youtube/url` | Lê e troca só a URL RTMP (`null` volta à global); nunca mostra a key |
 | `PUT /quadras/{quadra_id}/youtube` | Troca `stream_key` e/ou `rtmp_url` (`null` volta à global) no `cameras.json`. Não vale com a quadra transmitindo (`409`); `rtmp_url` só `rtmp://` com host em `RTMP_ALLOWED_HOSTS` (`422`) |
 | `POST /broadcast/{quadra_id}/start` / `.../stop` | Liga/encerra a transmissão **com placar** (o servidor reencoda e desenha o overlay). Até 2 ao mesmo tempo (`409` na 3ª); `409` também se a quadra estiver em live direta |
@@ -451,7 +481,7 @@ uma enquanto outra com a mesma key está no ar responde `409`, e o painel avisa 
 o botão.
 
 **Painel web:** `http://SERVIDOR:8000/painel` (a mesma porta 8000 da API; celular ou computador) liga/encerra as
-duas modalidades e controla placar, sets, nomes e volume (até 100%, o volume original da câmera), e (aba **Destino**) consulta e troca a stream
+duas modalidades e controla placar, sets, nomes e volume (até 100%, o volume original da câmera), e, em abas por cartão, ajusta o **áudio** ao vivo (corte de agudos e redução de ruído, sem relançar) e (aba **Destino**) consulta e troca a stream
 key e a URL RTMP de cada quadra. Tema claro/escuro, abas por cartão e janelas de confirmação próprias.
 Exige `ADMIN_USERNAME` e `ADMIN_PASSWORD` no `.env`; trafega em HTTP puro (na rede interna). Os dois modos, os
 casos de borda tratados e o que ainda não é coberto estão em
@@ -494,7 +524,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
 | `BROADCAST_MAX_CONCURRENT` / `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `2` / `ultrafast` / `4500k` / `4` | Transmissão com placar: simultâneas, preset x264, bitrate e núcleos por transmissão |
 | `BROADCAST_DIR` / `BROADCAST_STATE_FILE` / `BROADCAST_LOG_DIR` | `.data/broadcast` / `.data/broadcast_state.json` / `logs/` | Overlay e FIFO por quadra, estado das transmissões (placar, volume, pid, prazo) e logs do ffmpeg |
-| `AUDIO_DENOISE` | `medio` | Redução de ruído do áudio da transmissão **com placar**: `off`, `leve`, `medio` ou `forte` (~+1% de um núcleo por transmissão; vale quando a transmissão é iniciada/relançada; não afeta live direta nem replays) |
+| `AUDIO_DENOISE` | `medio` | Padrão da **redução de ruído** do áudio da transmissão com placar: `off`, `leve`, `medio` ou `forte`. Cada quadra pode ser ajustada ao vivo por `PUT /broadcast/{id}/audio` ou pelo painel (fica guardado) |
+| `AUDIO_CORTE_AGUDOS` | `medio` | Padrão do **corte de agudos** (tira o chiado agudo; a voz até 3,4 kHz não muda): `off`, `suave` (5 kHz), `medio` (4 kHz), `forte` (4 kHz íngreme) ou `maximo` (3,5 kHz). Mesmo ajuste por quadra; ~+1% de um núcleo por transmissão; não vale para live direta nem replays |
 | `BROADCAST_FONT` | `DejaVuSans-Bold.ttf` do sistema | Fonte do placar |
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do `volume/up\|down` e teto, em % |
 | `LIVE_MONITOR_INTERVAL_SECONDS` | `15` | Intervalo da verificação (em segundo plano) das lives diretas nas câmeras |
@@ -647,6 +678,8 @@ iniciar; (3) só então replicar pros 8 e passar à perfboard.
 | `recorded_at` em horário local com offset | ✅ corrigido; confirmar na plataforma após fila represada |
 | Autenticação Bearer (`LIVE_API_KEY`, `REPLAY_API_TOKEN`, `API_TOKENS`) nas rotas de controle | ✅ em produção; `X-Live-Key` e o cookie do painel seguem valendo |
 | Configurar stream key e URL RTMP por quadra via API (`GET`/`PUT /quadras/{id}/youtube`) | ✅ testado em instância isolada e por testes automatizados; a troca nunca vale com a quadra no ar |
+| Painel web renovado (abas Transmissão, Áudio e Destino; tema claro/escuro; volume até 100%) | ✅ verificado em navegador real contra a API isolada; os estados "no ar" foram simulados |
+| Áudio da transmissão com placar: corte de agudos e redução de ruído, por quadra, ajustáveis **ao vivo** (`GET`/`PUT /broadcast/{id}/audio` e painel) | ✅ custo medido (+1,1% de um núcleo) e troca ao vivo comprovada em ffmpeg real, com confirmação `ret:0`. ⚠️ o efeito **sonoro** só se confirma de ouvido numa live real; uma transmissão que subiu antes da cadeia nova só aceita a troca ao vivo depois de relançada |
 | Supervisão (watchdog em bash + units systemd) | ✅ watchdog em uso; units não instalados |
 | Botão físico definitivo (ESP32 + W5500) | 🔶 lógica validada com ESP8266; falta o hardware definitivo e replicar por local |
 | Contrato completo da API externa (`docs/replay-api.md`) | ⚠️ nunca lido; implementação baseada na especificação resumida |

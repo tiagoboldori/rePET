@@ -68,7 +68,19 @@ câmera ──RTSP──▶ ffmpeg ──RTMP──▶ YouTube
    API ── FIFO (stdin do ffmpeg): comandos de volume e o 'q' para encerrar
 ```
 
-- **Áudio.** O áudio da câmera passa por um corte do grave e por uma redução de ruído (`AUDIO_DENOISE`, padrão `medio`) **antes** do volume e do upmix para 44,1 kHz estéreo (assim processa 5,5x menos amostras e atua sempre no nível original). Medido no comando real: **+1,1% de um núcleo** sobre ~114%. A live direta não tem isso (sai da câmera). Trocar o nível exige reiniciar a API e vale na próxima (re)largada da transmissão.
+- **Áudio.** O áudio da câmera passa, antes do volume e do upmix para 44,1 kHz estéreo, por uma cadeia fixa de filtros nomeados
+  (`aresample=16000 -> highpass@hp -> afftdn@dn -> lowpass@lp1 -> lowpass@lp2`) com **dois ajustes por quadra**: a *redução de
+  ruído* (`AUDIO_DENOISE`, padrão `medio`) e o *corte de agudos* (`AUDIO_CORTE_AGUDOS`, padrão `medio` = 4 kHz). Medido em áudio
+  real das quadras: o corte reduz o chiado agudo em ~3 a ~16 dB conforme o nível, a voz até 3,4 kHz não muda, e o custo é
+  **+1,1% de um núcleo** sobre ~114%. Os níveis só trocam parâmetros (mix, frequência), então
+  [`PUT /broadcast/{id}/audio`](API.md#áudio-corte-de-agudos-e-redução-de-ruído) e a aba *Áudio* do painel os trocam **ao vivo, sem
+  relançar**, pelo mesmo canal do volume (o stdin do ffmpeg): o ffmpeg processa **um comando a cada ~0,5 s**, então a API manda só
+  o que mudou e **confirma pelas respostas dele** (`ret:0` aplicou, `ret:-38` o filtro não existe, `ret:-34` valor inválido).
+  O ajuste fica gravado no estado (sobrevive a reinício) e, ao readotar um ffmpeg, a API reenvia os gravados; uma transmissão que
+  subiu **antes** desta cadeia não tem os filtros (`aplicado_ao_vivo: false`) e só muda ao ser relançada. Com a quadra fora do
+  ar o ajuste vale ao iniciar. "off" deixa o filtro transparente (mix=0 / om=i), nunca o remove. A live direta não tem isso (sai da
+  câmera). Dica de uso: o `afftdn` só rebaixa ruído estacionário (alguns dB; no `forte` cria som metálico); para chiado agudo o que
+  funciona é o corte de agudos.
 - **Visual.** Nomes, sets e pontos ficam numa caixa **grená** (RGB `7B1E2B`, 85% de opacidade) no canto
   inferior esquerdo; a constante é `SCOREBOARD_BOX_COLOR` em `api/broadcast.py`. A cor é definida na linha de
   comando do ffmpeg, então **vale na próxima vez que a transmissão for iniciada ou relançada**: uma
@@ -177,7 +189,8 @@ Todas em `.env` (modelo em `.env.example`); mudar exige reiniciar a API.
 | `BROADCAST_MAX_CONCURRENT` | `2` | Transmissões com placar simultâneas |
 | `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `ultrafast` / `4500k` / `4` | Encode: preset x264, bitrate (sempre `<n>k`) e núcleos por transmissão |
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do volume e teto (%) |
-| `AUDIO_DENOISE` | `medio` | Redução de ruído do áudio da transmissão com placar: `off`, `leve`, `medio`, `forte`. Corta o grave (< 100 Hz) e rebaixa o ruído de fundo antes do volume; ~+1% de um núcleo por transmissão; vale ao iniciar/relançar; não afeta a live direta |
+| `AUDIO_DENOISE` | `medio` | Padrão da redução de ruído do áudio da transmissão com placar: `off`, `leve`, `medio`, `forte`. Ajustável por quadra, ao vivo, pela API e pelo painel |
+| `AUDIO_CORTE_AGUDOS` | `medio` | Padrão do corte de agudos: `off`, `suave` (5 kHz), `medio` (4 kHz), `forte` (4 kHz íngreme), `maximo` (3,5 kHz íngreme). Mesmo ajuste por quadra; não afeta a live direta |
 | `LIVE_MONITOR_INTERVAL_SECONDS` | `15` | De quanto em quanto tempo se pergunta às câmeras pela live direta |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Login do painel (e do `DELETE`); vazio = login `503` |
 | `PANEL_SESSION_HOURS` / `PANEL_SECRET` | `12` / vazio | Validade da sessão; segredo extra que assina o cookie |

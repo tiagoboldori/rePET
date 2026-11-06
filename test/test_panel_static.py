@@ -70,6 +70,7 @@ def test_js_so_chama_rotas_que_existem():
     # as rotas novas do destino da transmissão têm de estar entre as usadas
     assert ("quadras", "*", "youtube", "key") in {_segmentos(r) for r in usadas}
     assert ("quadras", "*", "youtube", "url") in {_segmentos(r) for r in usadas}
+    assert ("broadcast", "*", "audio") in {_segmentos(r) for r in usadas}  # aba Áudio
 
 
 def test_volume_do_painel_tem_teto_de_100():

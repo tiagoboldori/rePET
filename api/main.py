@@ -191,6 +191,11 @@ class BroadcastVolume(BaseModel):
     nivel: int  # % do volume da câmera (100 = original)
 
 
+class BroadcastAudio(BaseModel):
+    reducao_ruido: str | None = None  # off | leve | medio | forte
+    corte_agudos: str | None = None  # off | suave | medio | forte | maximo
+
+
 def _bc(quadra_id: str, call, *args):
     """Chama o módulo broadcast para uma quadra existente, traduzindo os erros."""
     _live_camera(quadra_id)
@@ -287,6 +292,28 @@ def broadcast_volume_step(quadra_id: str, direcao: str, passo: int | None = None
 @app.put("/broadcast/{quadra_id}/volume", dependencies=[Depends(require_live_access)])
 def broadcast_volume(quadra_id: str, body: BroadcastVolume):
     return _bc(quadra_id, broadcast.set_volume, body.nivel)
+
+
+@app.get("/broadcast/{quadra_id}/audio", dependencies=[Depends(require_live_access)])
+def broadcast_audio_get(quadra_id: str):
+    """Ajustes de áudio da quadra (redução de ruído e corte de agudos) e se o ffmpeg no ar já os usa."""
+    return _bc(quadra_id, broadcast.audio_view)
+
+
+@app.put("/broadcast/{quadra_id}/audio", dependencies=[Depends(require_live_access)])
+def broadcast_audio_put(quadra_id: str, body: BroadcastAudio, request: Request):
+    """Troca os ajustes de áudio (o que não vier não muda). Com a transmissão no ar vale na hora, sem relançar;
+    fora do ar fica gravado e vale ao iniciar."""
+    fields = body.model_fields_set
+    for campo in ("reducao_ruido", "corte_agudos"):
+        if campo in fields and getattr(body, campo) is None:
+            raise HTTPException(status_code=422, detail=f"{campo} não pode ser nulo (omita o campo para não mudar).")
+    view, changed = _bc(quadra_id, broadcast.set_audio, body.reducao_ruido, body.corte_agudos)
+    if changed:  # auditoria: quem e o quê
+        who = getattr(request.state, "token_owner", "desconhecido")
+        print(f"[broadcast] {quadra_id}: áudio alterado (redução de ruído {view['reducao_ruido']}, "
+              f"corte de agudos {view['corte_agudos']}) por {who}.")
+    return {"status": "atualizada" if changed else "sem_mudanca", **view}
 
 
 # --- Estado geral (usado pelo painel) -----------------------------------------

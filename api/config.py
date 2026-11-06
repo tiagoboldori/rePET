@@ -177,6 +177,27 @@ def parse_audio_denoise(raw: str | None) -> str:
 
 
 AUDIO_DENOISE = parse_audio_denoise(os.environ.get("AUDIO_DENOISE", "medio"))
+
+# Corte de agudos do áudio da transmissão com placar (tira o chiado agudo; a voz até ~3,4 kHz não muda).
+# off | suave (5 kHz) | medio (4 kHz) | forte (4 kHz, íngreme) | maximo (3,5 kHz, íngreme). Padrão: medio.
+# É o padrão de cada quadra; cada uma pode ser ajustada ao vivo por PUT /broadcast/{id}/audio ou pelo painel.
+_CORTE_ALIASES = {**{k: v for k, v in _DENOISE_ALIASES.items() if v == "off"},
+                  "suave": "suave", "medio": "medio", "médio": "medio", "forte": "forte", "maximo": "maximo", "máximo": "maximo"}
+
+
+def parse_audio_corte_agudos(raw: str | None) -> str:
+    """Normaliza AUDIO_CORTE_AGUDOS (vazio ou desconhecido cai no padrão medio, com aviso; nunca levanta)."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return "medio"
+    level = _CORTE_ALIASES.get(value)
+    if level is None:
+        print(f"[config] aviso: AUDIO_CORTE_AGUDOS='{value}' desconhecido (use off, suave, medio, forte ou maximo); usando medio.")
+        return "medio"
+    return level
+
+
+AUDIO_CORTE_AGUDOS = parse_audio_corte_agudos(os.environ.get("AUDIO_CORTE_AGUDOS", "medio"))
 BROADCAST_DIR = Path(os.environ.get("BROADCAST_DIR", str(_ROOT / ".data" / "broadcast")))
 BROADCAST_STATE_FILE = Path(
     os.environ.get("BROADCAST_STATE_FILE", str(_ROOT / ".data" / "broadcast_state.json"))
