@@ -262,12 +262,20 @@ function updateCard(card, q) {
     avisos.push("Transmissão com placar e live direta ligadas ao mesmo tempo (mesma stream key). Encerre uma das duas.");
   }
 
+  const emUso = q.chave_em_uso_por && !p.no_ar && modo !== "direta" ? q.chave_em_uso_por : null;
+  if (emUso) {
+    const outra = overview.quadras.find((x) => x.quadra_id === emUso);
+    avisos.push(`A stream key é a mesma de ${outra ? outra.nome : emUso}, que está no ar. Encerre-a antes de iniciar aqui.`);
+  } else if (q.chave_compartilhada_com.length && (modo === "nenhum" || modo === "desconhecido")) {
+    const nomes = q.chave_compartilhada_com.map((id) => (overview.quadras.find((x) => x.quadra_id === id) || { nome: id }).nome);
+    card.info.textContent = `Compartilha a stream key com ${nomes.join(", ")}: só uma por vez.`;
+  }
   const semChave = !q.tem_stream_key;
   if (semChave) avisos.push("Esta quadra não tem youtube_stream_key em cameras.json.");
   const cheio = overview.transmissoes_com_placar.no_ar >= overview.transmissoes_com_placar.limite && !p.no_ar;
   if (cheio && !semChave) avisos.push("Limite de transmissões com placar atingido; encerre outra para iniciar aqui.");
-  card.btnPlacar.disabled = semChave || cheio;
-  card.btnDireta.disabled = semChave;
+  card.btnPlacar.disabled = semChave || cheio || Boolean(emUso);
+  card.btnDireta.disabled = semChave || Boolean(emUso);
   card.aviso.hidden = avisos.length === 0;
   card.aviso.textContent = avisos.join(" ");
 }

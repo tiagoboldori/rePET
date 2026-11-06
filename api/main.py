@@ -146,6 +146,12 @@ def start_live(quadra_id: str):
             status_code=409,
             detail=f"'{quadra_id}' está em transmissão com placar; encerre-a antes (POST /broadcast/{quadra_id}/stop).",
         )
+    other = monitor.key_in_use_by(quadra_id, config.load_cameras(), fresh=True)
+    if other:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A stream key de '{quadra_id}' é a mesma de '{other}', que já está no ar; encerre '{other}' antes.",
+        )
     try:
         started = live.start(quadra_id, camera["input_url"], stream_key)
     except live.LiveError as exc:
@@ -231,6 +237,12 @@ def broadcast_start(quadra_id: str, body: BroadcastStart | None = None):
                 status_code=409,
                 detail=f"'{quadra_id}' está em live direta; encerre-a antes (POST /live/{quadra_id}/stop).",
             )
+        other = monitor.key_in_use_by(quadra_id, config.load_cameras(), fresh=True)
+        if other:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A stream key de '{quadra_id}' é a mesma de '{other}', que já está no ar; encerre '{other}' antes.",
+            )
     try:
         started = broadcast.start(
             quadra_id, camera, {"a": body.nome_a, "b": body.nome_b}, body.reset, body.volume
@@ -299,7 +311,8 @@ def live_overview():
     não respondeu e não há transmissão com placar).
     """
     quadras = []
-    for quadra_id, camera in config.load_cameras().items():
+    cameras = config.load_cameras()
+    for quadra_id, camera in cameras.items():
         direta = monitor.get(quadra_id)
         placar = broadcast.snapshot(quadra_id)
         if placar["no_ar"] and direta["no_ar"]:
@@ -317,6 +330,10 @@ def live_overview():
             "nome": camera.get("nome", quadra_id),
             "esporte": camera.get("esporte"),
             "tem_stream_key": bool(camera.get("youtube_stream_key")),
+            # Quadras com a MESMA stream key (intencional) e, destas, a que está no ar agora:
+            # enquanto uma estiver no ar, as outras não podem ligar (409).
+            "chave_compartilhada_com": monitor.shared_key_with(quadra_id, cameras),
+            "chave_em_uso_por": monitor.key_in_use_by(quadra_id, cameras),
             "modo": modo,
             "direta": direta,
             "placar": placar,

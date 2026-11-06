@@ -19,6 +19,19 @@ PY="$ROOT/.venv/bin/python"
 QUIET="${ENSURE_SERVICES_QUIET:-0}"
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
+# Variáveis do .env que o ambiente do watchdog AINDA NÃO TEM passam a valer quando um serviço
+# é relançado (ex.: `kill $(cat run/api.pid)` depois de acrescentar ADMIN_USERNAME), sem reiniciar
+# o serviço inteiro, o que derrubaria as capturas. Como no boot.sh, variável já exportada tem
+# prioridade: mudar o VALOR de uma que já existe ainda exige reiniciar o serviço (ou reboot).
+if [[ -f "$ROOT/.env" ]]; then
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        if [[ -z "${!key:-}" ]]; then
+            export "$key=$value"
+        fi
+    done < <(grep -vE '^\s*(#|$)' "$ROOT/.env")
+fi
+
 info() { echo "[INFO]    $*"; }
 fail() { echo "[FALHOU]  $*"; }
 ok()   { [[ "$QUIET" == "1" ]] || echo "[OK]      $*"; }

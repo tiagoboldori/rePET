@@ -90,3 +90,53 @@ def test_mark_atualiza_o_cache_na_hora(env):
     assert monitor.get("q1")["no_ar"] is True
     monitor.mark("q1", False)
     assert monitor.get("q1")["no_ar"] is False
+
+
+# --- stream key compartilhada (intencional): uma live por vez ----------------------
+
+SHARED = {
+    "a": {"quadra_id": "a", "input_url": "rtsp://u:p@10.0.0.1/s", "youtube_stream_key": "K"},
+    "b": {"quadra_id": "b", "input_url": "rtsp://u:p@10.0.0.2/s", "youtube_stream_key": "K"},
+    "c": {"quadra_id": "c", "input_url": "rtsp://u:p@10.0.0.3/s", "youtube_stream_key": "OUTRA"},
+    "d": {"quadra_id": "d", "input_url": "rtsp://u:p@10.0.0.4/s"},  # sem key
+}
+
+
+def test_quadras_com_a_mesma_key(env):
+    assert monitor.shared_key_with("a", SHARED) == ["b"]
+    assert monitor.shared_key_with("c", SHARED) == [] and monitor.shared_key_with("d", SHARED) == []
+    assert monitor.shared_key_with("nao-existe", SHARED) == []
+
+
+def test_key_em_uso_por_transmissao_com_placar(env, monkeypatch):
+    monkeypatch.setattr(broadcast, "is_on_air", lambda q: q == "b")
+    assert monitor.key_in_use_by("a", SHARED) == "b"
+    assert monitor.key_in_use_by("c", SHARED) is None  # key diferente não conflita
+    monkeypatch.setattr(broadcast, "is_on_air", lambda q: False)
+    assert monitor.key_in_use_by("a", SHARED) is None
+
+
+def test_key_em_uso_por_live_direta_usa_o_cache_ou_pergunta_a_camera(env, monkeypatch):
+    monkeypatch.setattr(broadcast, "is_on_air", lambda q: False)
+    monitor.mark("b", True)
+    assert monitor.key_in_use_by("a", SHARED) == "b"  # cache
+    monitor.mark("b", False)  # cache diz que não, mas a câmera diz que sim (cache velho)
+    env["10.0.0.2"] = True
+    assert monitor.key_in_use_by("a", SHARED) is None
+    assert monitor.key_in_use_by("a", SHARED, fresh=True) == "b"  # ao ligar pergunta na hora
+    assert monitor.get("b")["no_ar"] is True  # e atualiza o cache
+
+
+def test_camera_da_outra_quadra_sem_resposta_nao_bloqueia(env, monkeypatch):
+    monkeypatch.setattr(broadcast, "is_on_air", lambda q: False)
+    env["10.0.0.2"] = live.LiveError("câmera não respondeu.")
+    assert monitor.key_in_use_by("a", SHARED, fresh=True) is None
+
+
+def test_aviso_de_subida_para_a_mesma_key_no_ar_em_duas_quadras(env, monkeypatch):
+    env.update({"10.0.0.1": True, "10.0.0.2": True, "10.0.0.3": False, "10.0.0.4": False})
+    monkeypatch.setattr(broadcast, "is_on_air", lambda q: False)
+    summary = monitor.run_once(SHARED, first=True)
+    assert summary["chave_repetida_no_ar"] == ["a", "b"]
+    env.update({"10.0.0.2": False})
+    assert monitor.run_once(SHARED, first=False)["chave_repetida_no_ar"] == []

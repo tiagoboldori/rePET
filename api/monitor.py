@@ -47,6 +47,37 @@ def get(quadra_id: str) -> dict:
             "verificado_ha_segundos": round(time.time() - entry["em"])}
 
 
+def shared_key_with(quadra_id: str, cameras: dict[str, dict]) -> list[str]:
+    """Outras quadras que usam a MESMA stream key (duplicar é intencional: um canal só)."""
+    key = cameras.get(quadra_id, {}).get("youtube_stream_key")
+    if not key:
+        return []
+    return [q for q, c in cameras.items() if q != quadra_id and c.get("youtube_stream_key") == key]
+
+
+def key_in_use_by(quadra_id: str, cameras: dict[str, dict], fresh: bool = False) -> str | None:
+    """Quadra de mesma stream key que já está no ar (em qualquer modo), ou None.
+
+    Duas lives na mesma key disputariam o mesmo ingest do YouTube (a segunda derruba a
+    primeira ou as duas ficam instáveis). `fresh=True` (ao ligar) pergunta à câmera da
+    outra quadra na hora, em vez de confiar no cache da verificação periódica; câmera que
+    não responde conta como "não está no ar" (não dá para provar o contrário)."""
+    for other_id in shared_key_with(quadra_id, cameras):
+        if broadcast.is_on_air(other_id):
+            return other_id
+        other = cameras[other_id]
+        if fresh and str(other.get("input_url", "")).startswith("rtsp://"):
+            try:
+                if live.status(other["input_url"]):
+                    mark(other_id, True)
+                    return other_id
+            except live.LiveError:
+                pass
+        elif get(other_id)["no_ar"]:
+            return other_id
+    return None
+
+
 def mark(quadra_id: str, no_ar: bool) -> None:
     """Atualiza o cache na hora (depois de ligar/desligar), sem esperar a próxima rodada."""
     with _lock:
@@ -56,7 +87,8 @@ def mark(quadra_id: str, no_ar: bool) -> None:
 def run_once(cameras: dict[str, dict], first: bool = False) -> dict:
     """Pergunta a todas as câmeras RTSP, em paralelo. Na 1ª rodada, reconcilia."""
     targets = {q: c for q, c in cameras.items() if str(c.get("input_url", "")).startswith("rtsp://")}
-    summary = {"direta": [], "placar": [], "adotadas": [], "prazos_obsoletos": [], "conflitos": [], "sem_resposta": []}
+    summary = {"direta": [], "placar": [], "adotadas": [], "prazos_obsoletos": [], "conflitos": [], "sem_resposta": [],
+               "chave_repetida_no_ar": []}
     if targets:
         with ThreadPoolExecutor(max_workers=min(len(targets), 4)) as pool:
             results = dict(zip(targets, pool.map(lambda item: _check(*item), targets.items())))
@@ -78,6 +110,10 @@ def run_once(cameras: dict[str, dict], first: bool = False) -> dict:
                 summary["adotadas"].append(quadra_id)
         elif first and live.drop_stale(quadra_id):
             summary["prazos_obsoletos"].append(quadra_id)
+    on_air = set(summary["placar"]) | set(summary["direta"])
+    summary["chave_repetida_no_ar"] = sorted(
+        q for q in on_air if any(o in on_air for o in shared_key_with(q, cameras))
+    )
     return summary
 
 
@@ -88,6 +124,11 @@ def _log_startup(summary: dict) -> None:
         f"prazo_dado_a_direta_orfa={summary['adotadas']} prazos_obsoletos={summary['prazos_obsoletos']} "
         f"sem_resposta_da_camera={summary['sem_resposta']}"
     )
+    if summary["chave_repetida_no_ar"]:
+        print(
+            f"[startup] ATENÇÃO: quadras {summary['chave_repetida_no_ar']} estão no ar com a MESMA "
+            "stream key ao mesmo tempo; encerre uma."
+        )
     for quadra_id in summary["conflitos"]:
         print(
             f"[startup] ATENÇÃO {quadra_id}: transmissão com placar E live direta no ar ao mesmo "
