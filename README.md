@@ -145,6 +145,8 @@ só com a música; a live, como é a câmera quem transmite, fica sem trilha de
 
 ## API
 
+Prompt pronto para um agente integrar um painel de controle em outra aplicação web: [`docs/PROMPT_INTEGRACAO_PAINEL.md`](docs/PROMPT_INTEGRACAO_PAINEL.md).
+
 Referência completa de rotas, com exemplos de `curl` (gravar replay, live direta, transmissão com placar, painel, consultar e apagar replays): [`docs/API.md`](docs/API.md). Como as duas modalidades de live funcionam, quando usar cada uma e os casos de borda: [`docs/LIVE.md`](docs/LIVE.md).
 
 Público (sem autenticação):
@@ -159,10 +161,10 @@ Público (sem autenticação):
 | `GET /clips/<arquivo>.mp4` | Clipe bruto (StaticFiles sobre `OUTPUT_DIR`) |
 | `GET /health` | Healthcheck |
 
-| Endpoint (header `X-Live-Key` = `LIVE_API_KEY`) | Descrição |
+| Endpoint (header `Authorization: Bearer <LIVE_API_KEY ou REPLAY_API_TOKEN>`; o legado `X-Live-Key` também vale) | Descrição |
 |---|---|
 | `GET /live/{quadra_id}` | `{no_ar: bool}`, lido direto da câmera (`enabled` do `/ISAPI/Custom/RTMP`). `502` se a câmera não responde |
-| `POST /live/{quadra_id}` | Liga a live: configura a **câmera** (ISAPI) para empurrar o RTMP direto ao YouTube, sem passar pelo servidor. Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; a API desliga a câmera após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key, `502` câmera/DNS com problema |
+| `POST /live/{quadra_id}` | Liga a live: configura a **câmera** (ISAPI) para empurrar o RTMP direto ao YouTube, sem passar pelo servidor. Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; a API desliga a câmera após `LIVE_MAX_SECONDS`. `503` sem nenhum token configurado, `401` token errado, `422` sem stream key, `502` câmera/DNS com problema |
 | `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Desliga a live (o `POST` é para quem só consegue fazer POST) |
 | `POST /broadcast/{quadra_id}/start` / `.../stop` | Liga/encerra a transmissão **com placar** (o servidor reencoda e desenha o overlay). Até 2 ao mesmo tempo (`409` na 3ª); `409` também se a quadra estiver em live direta |
 | `POST /broadcast/{quadra_id}/ponto/{a\|b}` · `.../set/{a\|b}` | +1 ponto (`?delta=-1` corrige) · +1 set e zera os pontos dos dois lados |
@@ -238,7 +240,7 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `FTP_HOST` / `FTP_USER` / `FTP_PASSWORD` | — (obrigatórias p/ integração) | Servidor de arquivos do clube; sem eles o worker não sobe |
 | `FTP_PORT` / `FTP_BASE_DIR` / `FTP_TIMEOUT_SECONDS` | `21` / `Lara/Repet` / `60` | Porta, pasta do Lara no FTP e timeout |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Credencial do `DELETE`; vazio = sempre `401` |
-| `LIVE_API_KEY` | vazio | Chave do `/live/*` (header `X-Live-Key`); vazio = `503` |
+| `LIVE_API_KEY` | vazio | Token das rotas `/live`, `/broadcast` e `/status`: `Authorization: Bearer` (ou o legado `X-Live-Key`). O `REPLAY_API_TOKEN` e as chaves nomeadas de `API_TOKENS` (`nome:token,...`, uma por integração) também são aceitos no Bearer; sem nenhum = `503` |
 | `LIVE_MAX_SECONDS` | `7200` | Desliga a live na câmera depois desse tempo; `0` = sem limite |
 | `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
 | `BROADCAST_MAX_CONCURRENT` / `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `2` / `ultrafast` / `4500k` / `4` | Transmissão com placar: simultâneas, preset x264, bitrate e núcleos por transmissão |

@@ -11,7 +11,8 @@ A documentação interativa (Swagger), gerada pelo FastAPI, fica em
 
 - `SERVIDOR` = host/IP da máquina da API (`http://SERVIDOR:8000`);
 - `loc1-quadra1` = um `quadra_id` de `config/cameras.json`;
-- `SUA_LIVE_API_KEY`, `SEU_USUARIO`, `SUA_SENHA` = valores do seu `.env`
+- `SEU_TOKEN` = uma chave de `API_TOKENS`, a `LIVE_API_KEY` **ou** o `REPLAY_API_TOKEN` do seu `.env` (veja [Autenticação](#autenticação));
+- `SEU_USUARIO`, `SUA_SENHA` = `ADMIN_USERNAME`/`ADMIN_PASSWORD` do seu `.env`
   (**nunca** coloque credencial real em arquivo versionado);
 - os valores nas respostas (tempos, ids, tamanhos) são ilustrativos.
 
@@ -35,20 +36,20 @@ A documentação interativa (Swagger), gerada pelo FastAPI, fica em
 | Rota | Autenticação | Para quê |
 |---|---|---|
 | `POST /replay/{quadra_id}` | nenhuma | Grava (corta) o replay dos últimos segundos |
-| `POST /live/{quadra_id}` | `X-Live-Key` | Liga a live no YouTube |
-| `POST /live/{quadra_id}/stop` ou `DELETE /live/{quadra_id}` | `X-Live-Key` | Desliga a live |
-| `GET /live/{quadra_id}` | `X-Live-Key` | Diz se a live está no ar |
-| `POST /broadcast/{quadra_id}/start` | `X-Live-Key` | Liga a transmissão **com placar** (até 2 ao mesmo tempo) |
-| `POST /broadcast/{quadra_id}/stop` ou `DELETE /broadcast/{quadra_id}` | `X-Live-Key` | Encerra a transmissão com placar |
-| `POST /broadcast/{quadra_id}/ponto/{a\|b}` | `X-Live-Key` | +1 ponto (`?delta=-1` corrige) |
-| `POST /broadcast/{quadra_id}/set/{a\|b}` | `X-Live-Key` | +1 set e zera os pontos |
-| `PUT /broadcast/{quadra_id}/placar` | `X-Live-Key` | Correção manual do placar |
-| `POST /broadcast/{quadra_id}/placar/zerar` | `X-Live-Key` | Zera pontos e sets |
-| `PUT /broadcast/{quadra_id}/nomes` | `X-Live-Key` | Troca os nomes das duplas |
-| `POST /broadcast/{quadra_id}/volume/{up\|down}` | `X-Live-Key` | Sobe/desce o volume com a live no ar |
-| `PUT /broadcast/{quadra_id}/volume` | `X-Live-Key` | Define o volume |
-| `GET /broadcast`, `GET /broadcast/{quadra_id}` | `X-Live-Key` | Estado (placar, nomes, volume, tempo no ar) |
-| `GET /status` | `X-Live-Key` ou sessão do painel | Uma linha por quadra com os dois modos (direta e placar) |
+| `POST /live/{quadra_id}` | `Bearer` | Liga a live no YouTube |
+| `POST /live/{quadra_id}/stop` ou `DELETE /live/{quadra_id}` | `Bearer` | Desliga a live |
+| `GET /live/{quadra_id}` | `Bearer` | Diz se a live está no ar |
+| `POST /broadcast/{quadra_id}/start` | `Bearer` | Liga a transmissão **com placar** (até 2 ao mesmo tempo) |
+| `POST /broadcast/{quadra_id}/stop` ou `DELETE /broadcast/{quadra_id}` | `Bearer` | Encerra a transmissão com placar |
+| `POST /broadcast/{quadra_id}/ponto/{a\|b}` | `Bearer` | +1 ponto (`?delta=-1` corrige) |
+| `POST /broadcast/{quadra_id}/set/{a\|b}` | `Bearer` | +1 set e zera os pontos |
+| `PUT /broadcast/{quadra_id}/placar` | `Bearer` | Correção manual do placar |
+| `POST /broadcast/{quadra_id}/placar/zerar` | `Bearer` | Zera pontos e sets |
+| `PUT /broadcast/{quadra_id}/nomes` | `Bearer` | Troca os nomes das duplas |
+| `POST /broadcast/{quadra_id}/volume/{up\|down}` | `Bearer` | Sobe/desce o volume com a live no ar |
+| `PUT /broadcast/{quadra_id}/volume` | `Bearer` | Define o volume |
+| `GET /broadcast`, `GET /broadcast/{quadra_id}` | `Bearer` | Estado (placar, nomes, volume, tempo no ar) |
+| `GET /status` | `Bearer` ou sessão do painel | Uma linha por quadra com os dois modos (direta e placar) |
 | `GET /painel` | página pública; login dentro | Painel web de controle da transmissão (porta 8000, a mesma da API) |
 | `POST /painel/login`, `POST /painel/logout`, `GET /painel/me` | credencial `ADMIN_*` / cookie | Sessão do painel |
 | `GET /api/replays/{replay_id}` | nenhuma | Metadados de um replay |
@@ -63,33 +64,77 @@ A documentação interativa (Swagger), gerada pelo FastAPI, fica em
 
 ## Autenticação
 
-São três mecanismos, conforme a rota:
+São quatro mecanismos, conforme a rota:
 
 | Mecanismo | Onde se usa | Como enviar |
 |---|---|---|
-| **Chave da live** | `/live`, `/broadcast`, `/status` (scripts e integrações) | Header `X-Live-Key: <LIVE_API_KEY>` |
+| **Bearer token** (recomendado) | `/live`, `/broadcast`, `/status` (integrações e scripts) | Header `Authorization: Bearer <token>` |
+| **`X-Live-Key`** (legado) | as mesmas rotas | Header `X-Live-Key: <LIVE_API_KEY>`; continua valendo, mas prefira o Bearer |
 | **Sessão do painel** | as mesmas rotas, quando chamadas pelo painel web | Cookie `repet_painel` (criado em `POST /painel/login`) + header `X-Painel: 1` nas rotas que **mudam** algo |
 | **HTTP Basic** | `DELETE /api/replays/{id}` | `-u SEU_USUARIO:SUA_SENHA` (`ADMIN_USERNAME` / `ADMIN_PASSWORD`) |
 
-Exemplo de requisição com a chave:
+### Qual token mandar no Bearer
+
+O servidor aceita **qualquer um** destes valores como token, e todos abrem exatamente as mesmas
+rotas:
+
+| Token | Variável no servidor | Quando usar |
+|---|---|---|
+| Chave nomeada de integração | `API_TOKENS` (`nome:token,nome2:token2`) | **Recomendado para cada integração nova**: uma chave por sistema, revogável sozinha |
+| Token próprio da API de live | `LIVE_API_KEY` | Scripts internos; é também a chave do header legado `X-Live-Key` |
+| Token do Lara | `REPLAY_API_TOKEN` (o Sanctum, gerado com `php artisan replay:token`) | Quando o Lara já tem esse token e prefere não guardar um segundo segredo |
+
+Gerar e cadastrar uma chave nova (o `nome` é só um rótulo; o que vai no Bearer é o token):
+
+```bash
+python3 -c "import secrets; print('repet_live_' + secrets.token_urlsafe(32))"
+# acrescente ao .env do servidor (uma linha, pares separados por vírgula):
+# API_TOKENS=painel-web:repet_live_xxxxxxxx
+# reinicie a API para valer. Para revogar, apague o par e reinicie.
+```
+
+O token do Lara é enviado inteiro, com o `id|` na frente (por exemplo `7|abc...`). A
+variável que não estiver configurada simplesmente não é aceita (nunca vale vazio).
 
 ```http
 POST /live/loc1-quadra1 HTTP/1.1
 Host: SERVIDOR:8000
-X-Live-Key: SUA_LIVE_API_KEY
+Authorization: Bearer SEU_TOKEN
 ```
 
-Se a requisição trouxer `X-Live-Key`, só ela é avaliada (chave errada dá `401`,
-mesmo que haja cookie). Sem a chave, vale o cookie do painel.
+```bash
+curl -X POST http://SERVIDOR:8000/live/loc1-quadra1 \
+  -H "Authorization: Bearer SEU_TOKEN"
+```
+
+Regras:
+
+- Se a requisição trouxer `Authorization: Bearer ...`, **só ele é avaliado**: token errado dá `401`
+  mesmo que venham também um `X-Live-Key` correto ou um cookie válido.
+- O esquema `Bearer` não diferencia maiúsculas (`bearer` vale). Outro esquema em `Authorization`
+  (por exemplo `Basic`) é ignorado nessas rotas.
+- O token do Lara e as chaves de `API_TOKENS` **só** valem via `Bearer`; no `X-Live-Key` continua valendo só a `LIVE_API_KEY`.
+- Rotas fora de `/live`, `/broadcast` e `/status` **não** usam Bearer: `POST /replay/{quadra_id}` e as
+  consultas de replay seguem abertas, e o `DELETE` de replay segue com HTTP Basic.
+- O token dá controle total das transmissões. Guarde-o só no **servidor** da aplicação que integra
+  (nunca no navegador, no JavaScript do front, em URL ou em log). Veja o CORS abaixo.
+- O tráfego é HTTP puro: fora da rede interna, ponha um proxy HTTPS na frente, senão o token trafega
+  em claro.
+
+**CORS.** A API não habilita CORS. Chamadas feitas direto do navegador (de outra origem) são
+bloqueadas por ele, e isso é intencional: a integração deve chamar a API a partir do **backend** da
+aplicação (no Lara, um controller/serviço Laravel), que repassa o resultado ao front.
 
 Respostas de falha de autenticação:
 
 | Situação | Código | Corpo |
 |---|---|---|
+| Bearer errado ou vazio | `401` (com `WWW-Authenticate: Bearer`) | `{"detail": "Token inválido."}` |
 | `X-Live-Key` errada | `401` | `{"detail": "Chave inválida."}` |
-| Sem chave e sem sessão | `401` | `{"detail": "Chave inválida ou sessão ausente."}` |
+| Sem credencial e sem sessão | `401` (com `WWW-Authenticate: Bearer`) | `{"detail": "Chave inválida ou sessão ausente."}` |
 | Sessão (cookie) sem o header `X-Painel: 1` em rota que muda algo | `403` | `{"detail": "Falta o header X-Painel."}` |
-| `LIVE_API_KEY` não configurada no servidor | `503` | `{"detail": "LIVE_API_KEY não configurada."}` |
+| Nenhum token (`LIVE_API_KEY`, `REPLAY_API_TOKEN`, `API_TOKENS`) configurado no servidor | `503` | `{"detail": "Nenhum token configurado (LIVE_API_KEY / REPLAY_API_TOKEN / API_TOKENS)."}` |
+| `X-Live-Key` enviada, mas `LIVE_API_KEY` não configurada | `503` | `{"detail": "LIVE_API_KEY não configurada."}` |
 | HTTP Basic errado ou não configurado | `401` (com `WWW-Authenticate: Basic`) | `{"detail": "Credencial inválida."}` |
 
 ## Formato dos erros
@@ -187,8 +232,8 @@ Hikvision) para empurrar o RTMP direto ao YouTube, sem passar vídeo pelo
 servidor. A stream key de cada quadra fica em `youtube_stream_key` no
 `config/cameras.json`.
 
-Todas as rotas de live exigem o header `X-Live-Key` com o valor de
-`LIVE_API_KEY` (a mesma chave vale para todas as quadras). As rotas de `/live` e
+Todas as rotas de live exigem `Authorization: Bearer <token>` (a `LIVE_API_KEY` ou o
+`REPLAY_API_TOKEN`; o mesmo token vale para todas as quadras; o header legado `X-Live-Key` também funciona). As rotas de `/live` e
 `/broadcast` também aceitam a **sessão do [painel web](#painel-web)** (cookie), que
 é como o painel as usa sem expor a chave. Os dois modos, quando usar cada um e os
 casos de borda estão em [`docs/LIVE.md`](LIVE.md).
@@ -203,7 +248,7 @@ Nenhuma das três rotas tem corpo.
 
 ```bash
 curl -X POST http://SERVIDOR:8000/live/loc1-quadra1 \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**
@@ -237,11 +282,11 @@ para quem só consegue fazer POST).
 
 ```bash
 curl -X POST http://SERVIDOR:8000/live/loc1-quadra1/stop \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 
 # equivalente
 curl -X DELETE http://SERVIDOR:8000/live/loc1-quadra1 \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**
@@ -260,7 +305,7 @@ desligar, a stream key também é apagada da câmera.
 **Requisição**
 
 ```bash
-curl http://SERVIDOR:8000/live/loc1-quadra1 -H "X-Live-Key: SUA_LIVE_API_KEY"
+curl http://SERVIDOR:8000/live/loc1-quadra1 -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**
@@ -279,12 +324,12 @@ só existe no YouTube Studio. Para um estado que não espera a câmera, use
 
 | Código | Quando | Exemplo de corpo |
 |---|---|---|
-| `401` | Header `X-Live-Key` ausente ou errado | `{"detail": "Chave inválida."}` |
+| `401` | Token ausente ou errado | `{"detail": "Token inválido."}` (ou `"Chave inválida ou sessão ausente."` se nada foi enviado) |
 | `404` | `quadra_id` não está em `config/cameras.json` | `{"detail": "quadra_id 'loc9-x' não está em config/cameras.json."}` |
 | `409` | (`POST`) A quadra está em transmissão com placar, ou outra quadra de **mesma stream key** já está no ar | `{"detail": "'loc1-quadra1' está em transmissão com placar; encerre-a antes (POST /broadcast/loc1-quadra1/stop)."}` |
 | `422` | (`POST`) A quadra não tem `youtube_stream_key` no `cameras.json` | `{"detail": "'loc1-quadra2' não tem youtube_stream_key em config/cameras.json."}` |
 | `502` | Câmera não respondeu/recusou, ou o DNS do YouTube não resolveu | `{"detail": "<motivo devolvido pela câmera>"}` |
-| `503` | `LIVE_API_KEY` não está configurada no servidor | `{"detail": "LIVE_API_KEY não configurada."}` |
+| `503` | Nenhum token (`LIVE_API_KEY` / `REPLAY_API_TOKEN` / `API_TOKENS`) configurado no servidor | `{"detail": "Nenhum token configurado (LIVE_API_KEY / REPLAY_API_TOKEN / API_TOKENS)."}` |
 
 Observações:
 
@@ -309,7 +354,7 @@ Use a live direta (`/live`) quando não precisar de placar; ela não gasta CPU.
   (`BROADCAST_MAX_CONCURRENT`); a terceira recebe `409`.
 - Todas as câmeras saem em **1080p** (a quadra2 entrega 1440p e é reduzida).
 - Atraso da imagem: alguns segundos a mais que a live direta (reencode).
-- Mesma chave `X-Live-Key` e mesmo prazo `LIVE_MAX_SECONDS` da live direta.
+- Mesma autorização (Bearer) e mesmo prazo `LIVE_MAX_SECONDS` da live direta.
 - Uma quadra não pode estar nos dois modos: ligar um com o outro no ar dá `409`.
 - **Sobrevive a reinício da API** (o ffmpeg roda destacado e é readotado), e se o
   ffmpeg cair, a API o relança sozinha (campo `reinicios`).
@@ -319,7 +364,7 @@ sets, números inteiros que **nunca ficam negativos** (valores abaixo de 0 viram
 
 ### Todas as rotas `/broadcast`
 
-Todas exigem `X-Live-Key` (ou sessão do painel) e `quadra_id` existente em `cameras.json`.
+Todas exigem `Authorization: Bearer` (ou sessão do painel) e `quadra_id` existente em `cameras.json`.
 Todas devolvem o [objeto de estado](#objeto-de-estado) (o `start`/`stop` somam `status`).
 
 | Método e rota | Corpo / parâmetros | O que faz |
@@ -402,7 +447,7 @@ Nome: só ficam letras, números, espaço e `. & ' -`; o resto é descartado.
 
 ```bash
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
-  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Authorization: Bearer SEU_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"}'
 ```
@@ -411,14 +456,14 @@ curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
 
 ```bash
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Exemplo 3: religar o mesmo jogo** (a API caiu, ou você encerrou sem querer)
 
 ```bash
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
-  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Authorization: Bearer SEU_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"reset": false}'
 ```
@@ -459,7 +504,7 @@ Sem corpo.
 
 ```bash
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/stop \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`** (placar e nomes ficam guardados)
@@ -490,14 +535,14 @@ curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/stop \
 
 ```bash
 # uma quadra
-curl http://SERVIDOR:8000/broadcast/loc1-quadra1 -H "X-Live-Key: SUA_LIVE_API_KEY"
+curl http://SERVIDOR:8000/broadcast/loc1-quadra1 -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 Resposta: o [objeto de estado](#objeto-de-estado).
 
 ```bash
 # todas as quadras registradas, e quais estão no ar
-curl http://SERVIDOR:8000/broadcast -H "X-Live-Key: SUA_LIVE_API_KEY"
+curl http://SERVIDOR:8000/broadcast -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 ```json
@@ -530,11 +575,11 @@ quem está transmitindo, use o campo `no_ar`.
 ```bash
 # +1 ponto para a dupla A
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 
 # desfaz um ponto da dupla A
 curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a?delta=-1" \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**: o [objeto de estado](#objeto-de-estado) já com o placar novo
@@ -569,11 +614,11 @@ Soma 1 set ao lado **e zera os pontos dos dois lados**. Com `delta=-1`, só tira
 ```bash
 # a dupla A ganhou o set: +1 set e pontos 0x0
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 
 # fechou o set pro lado errado: tira 1 set (pontos ficam como estão)
 curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a?delta=-1" \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**: o objeto de estado. Antes, `a: 6 pontos / 0 sets`,
@@ -608,7 +653,7 @@ Valores negativos viram 0.
 ```bash
 # o placar real é 40x15, com a dupla A com 1 set
 curl -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/placar \
-  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Authorization: Bearer SEU_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"pontos_a": 40, "pontos_b": 15, "sets_a": 1}'
 ```
@@ -625,7 +670,7 @@ Um corpo vazio `{}` é aceito e não muda nada.
 
 ```bash
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/placar/zerar \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**: o objeto de estado com `placar` todo em `0`.
@@ -646,7 +691,7 @@ Uma string vazia (ou só com caracteres descartados) volta ao nome padrão
 
 ```bash
 curl -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/nomes \
-  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Authorization: Bearer SEU_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"nome_a": "Ana e Bia"}'
 ```
@@ -675,11 +720,11 @@ erro. Vale na hora, sem derrubar a live.
 ```bash
 # +10 pontos percentuais (de 100 para 110)
 curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/up \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 
 # -20 pontos percentuais
 curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/down?passo=20" \
-  -H "X-Live-Key: SUA_LIVE_API_KEY"
+  -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**: o objeto de estado com o `volume` novo (aqui `110`).
@@ -696,7 +741,7 @@ curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/down?passo=20" 
 
 ```bash
 curl -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/volume \
-  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Authorization: Bearer SEU_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"nivel": 150}'
 ```
@@ -710,7 +755,7 @@ perfeito: o microfone da câmera já chega perto de 0 dBFS em jogo.
 
 | Código | Quando | Exemplo de corpo |
 |---|---|---|
-| `401` / `403` / `503` | Chave ausente/errada; cookie sem `X-Painel`; `LIVE_API_KEY` não configurada | `{"detail": "Chave inválida."}` |
+| `401` / `403` / `503` | Token ausente/errado; cookie sem `X-Painel`; nenhum token configurado | `{"detail": "Token inválido."}` |
 | `404` | `quadra_id` não está em `config/cameras.json` | `{"detail": "quadra_id 'loc9-x' não está em config/cameras.json."}` |
 | `409` | Limite de 2 transmissões | `{"detail": "limite de 2 transmissões simultâneas atingido."}` |
 | `409` | A quadra está em live direta (`start`) | `{"detail": "'loc1-quadra1' está em live direta; encerre-a antes (POST /live/loc1-quadra1/stop)."}` |
@@ -749,7 +794,7 @@ rota usada pelo painel.
 **Requisição**
 
 ```bash
-curl http://SERVIDOR:8000/status -H "X-Live-Key: SUA_LIVE_API_KEY"
+curl http://SERVIDOR:8000/status -H "Authorization: Bearer SEU_TOKEN"
 ```
 
 **Resposta `200`**
@@ -893,7 +938,7 @@ curl -b cookies.txt -c cookies.txt -X POST http://SERVIDOR:8000/painel/logout
 
 Com cookie, as rotas que mudam algo exigem também o header `X-Painel: 1` (defesa
 contra CSRF; o painel o envia sozinho), senão `403`. Os `GET` não precisam dele. Quem
-usa o header `X-Live-Key` (scripts) não precisa dele.
+usa o header `Authorization: Bearer` (ou o legado `X-Live-Key`) não precisa dele.
 
 ```bash
 curl -b cookies.txt -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a \
@@ -1102,7 +1147,7 @@ Fluxo típico de operação de uma quadra com placar, usando só `curl`:
 
 ```bash
 API=http://SERVIDOR:8000
-KEY="X-Live-Key: SUA_LIVE_API_KEY"
+KEY="Authorization: Bearer SEU_TOKEN"
 Q=loc1-quadra1
 JSON="Content-Type: application/json"
 
@@ -1133,7 +1178,7 @@ Em Python, o mesmo com `requests`:
 import requests
 
 API = "http://SERVIDOR:8000"
-HEADERS = {"X-Live-Key": "SUA_LIVE_API_KEY"}
+HEADERS = {"Authorization": "Bearer SEU_TOKEN"}
 QUADRA = "loc1-quadra1"
 
 r = requests.post(

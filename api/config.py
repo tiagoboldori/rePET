@@ -101,6 +101,26 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 # Sem default de propósito: vazia = o endpoint responde 503. A stream key de
 # cada quadra fica em `youtube_stream_key` no cameras.json.
 LIVE_API_KEY = os.environ.get("LIVE_API_KEY", "")
+
+
+def parse_api_tokens(raw: str) -> dict[str, str]:
+    """`nome:token,nome2:token2` -> {nome: token}. O nome é só um rótulo (para saber de quem é
+    cada chave e qual revogar); o token é o que vai em `Authorization: Bearer`. Entrada sem `:`,
+    com nome ou token vazio é ignorada (e avisada no log, sem imprimir o conteúdo)."""
+    tokens: dict[str, str] = {}
+    for entry in filter(None, (e.strip() for e in (raw or "").split(","))):
+        name, sep, token = entry.partition(":")
+        name, token = name.strip(), token.strip()
+        if not sep or not name or not token:
+            print("[config] aviso: entrada inválida em API_TOKENS ignorada (use nome:token).")
+            continue
+        tokens[name] = token
+    return tokens
+
+
+# Chaves nomeadas para integrações (cada uma revogável sozinha, sem mexer na LIVE_API_KEY nem no
+# REPLAY_API_TOKEN). Valem como `Authorization: Bearer` nas rotas /live, /broadcast e /status.
+API_TOKENS = parse_api_tokens(os.environ.get("API_TOKENS", ""))
 YOUTUBE_RTMP_URL = os.environ.get("YOUTUBE_RTMP_URL", "rtmp://a.rtmp.youtube.com/live2")
 # Desliga a live na câmera depois desse tempo (0 = sem limite); o prazo é gravado
 # em LIVE_STATE_FILE para sobreviver a reinício da API.

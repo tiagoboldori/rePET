@@ -4,10 +4,12 @@ POST /replay/{quadra_id} é chamado direto pelo firmware do botão físico
 (sem corpo; o quadra_id na URL basta).
 
 POST/DELETE /live/{quadra_id} liga/desliga o RTMP que a própria câmera
-empurra para o YouTube (via ISAPI); GET /live/{quadra_id} diz se está no ar. Exigem o header X-Live-Key (LIVE_API_KEY).
+empurra para o YouTube (via ISAPI); GET /live/{quadra_id} diz se está no ar. Exigem
+`Authorization: Bearer <token>` (LIVE_API_KEY ou REPLAY_API_TOKEN; o header legado
+X-Live-Key e a sessão do painel também valem; ver api/auth.py).
 
 /broadcast/{quadra_id}/... é a transmissão COM placar (o servidor reencoda e desenha
-o overlay): iniciar/encerrar, pontos, sets, nomes e volume. Mesmo header X-Live-Key.
+o overlay): iniciar/encerrar, pontos, sets, nomes e volume. Mesma autorização.
 
 Dev: uvicorn api.main:app --reload --port 8000
 """
@@ -17,15 +19,15 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from api import broadcast, config, live, monitor, panel
+from api import auth, broadcast, config, live, monitor, panel
 from clipper.clip_generator import (
     ClipGenerationError,
     generate_clip,
@@ -88,27 +90,14 @@ def require_admin(credentials: HTTPBasicCredentials = Depends(_admin_security)) 
         )
 
 
-def require_live_key(x_live_key: str | None = Header(default=None)) -> None:
-    """Exige o header X-Live-Key; sem LIVE_API_KEY configurada, recusa tudo."""
-    if not config.LIVE_API_KEY:
-        raise HTTPException(status_code=503, detail="LIVE_API_KEY não configurada.")
-    if not x_live_key or not secrets.compare_digest(x_live_key, config.LIVE_API_KEY):
-        raise HTTPException(status_code=401, detail="Chave inválida.")
+_bearer_scheme = HTTPBearer(auto_error=False, description="LIVE_API_KEY ou REPLAY_API_TOKEN")
 
 
-def require_live_access(request: Request, x_live_key: str | None = Header(default=None)) -> None:
-    """Chave X-Live-Key (scripts) OU sessão do painel (cookie). Com cookie, o que muda
-    algo exige também o header X-Painel: 1 (defesa contra CSRF)."""
-    if x_live_key:
-        require_live_key(x_live_key)
-        return
-    if panel.verify_token(request.cookies.get(panel.COOKIE)):
-        if request.method not in ("GET", "HEAD") and request.headers.get("x-painel") != "1":
-            raise HTTPException(status_code=403, detail="Falta o header X-Painel.")
-        return
-    if not config.LIVE_API_KEY and not panel.configured():
-        raise HTTPException(status_code=503, detail="LIVE_API_KEY não configurada.")
-    raise HTTPException(status_code=401, detail="Chave inválida ou sessão ausente.")
+def require_live_access(request: Request, _bearer: object = Depends(_bearer_scheme)) -> None:
+    """Bearer (LIVE_API_KEY ou REPLAY_API_TOKEN), X-Live-Key (legado) OU sessão do painel.
+    A regra completa está em api/auth.py; o HTTPBearer só registra o esquema no /docs
+    (auto_error=False: quem decide e responde é auth.check_access)."""
+    auth.check_access(request)
 
 
 def _live_camera(quadra_id: str) -> dict:

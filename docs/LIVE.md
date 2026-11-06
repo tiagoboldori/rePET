@@ -159,7 +159,7 @@ Todas em `.env` (modelo em `.env.example`); mudar exige reiniciar a API.
 
 | Variável | Padrão | Para quê |
 |---|---|---|
-| `LIVE_API_KEY` | vazio | Chave do header `X-Live-Key`; vazia = `503` |
+| `LIVE_API_KEY` | vazio | Token das rotas de controle (`Authorization: Bearer`, ou o legado `X-Live-Key`). O `REPLAY_API_TOKEN` e as chaves de `API_TOKENS` também valem no Bearer; sem nenhum = `503` |
 | `LIVE_MAX_SECONDS` | `7200` | Prazo de qualquer live; `0` = sem limite |
 | `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube |
 | `BROADCAST_MAX_CONCURRENT` | `2` | Transmissões com placar simultâneas |
@@ -175,10 +175,10 @@ Em `.env`, comentário só em linha própria (`LIVE_MAX_SECONDS=14400   # 4h` de
 
 ```bash
 # Estado de tudo (painel faz o mesmo)
-curl -s http://localhost:8000/status -H "X-Live-Key: $LIVE_API_KEY"
+curl -s http://localhost:8000/status -H "Authorization: Bearer $LIVE_API_KEY"
 
 # A transmissão está mesmo enviando? (transmitindo=false com no_ar=true = tentando)
-curl -s http://localhost:8000/broadcast/loc1-quadra1 -H "X-Live-Key: $LIVE_API_KEY"
+curl -s http://localhost:8000/broadcast/loc1-quadra1 -H "Authorization: Bearer $LIVE_API_KEY"
 
 tail -f logs/broadcast_loc1-quadra1.log     # ffmpeg da transmissão com placar
 grep '\[startup\]\|\[broadcast\]\|\[monitor\]' logs/api.log
