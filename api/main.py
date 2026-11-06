@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from api import auth, broadcast, config, live, monitor, panel
+from api import auth, broadcast, config, live, monitor, panel, stream_config
 from clipper.clip_generator import (
     ClipGenerationError,
     generate_clip,
@@ -142,7 +142,7 @@ def start_live(quadra_id: str):
             detail=f"A stream key de '{quadra_id}' é a mesma de '{other}', que já está no ar; encerre '{other}' antes.",
         )
     try:
-        started = live.start(quadra_id, camera["input_url"], stream_key)
+        started = live.start(quadra_id, camera["input_url"], stream_key, camera.get("rtmp_url"))
     except live.LiveError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     monitor.mark(quadra_id, True)
@@ -333,6 +333,91 @@ def live_overview():
         "transmissoes_com_placar": {"no_ar": on_air, "limite": config.BROADCAST_MAX_CONCURRENT},
         "verificacao_na_subida": monitor.last_startup_summary,
     }
+
+
+# --- Destino da transmissão: stream key e URL RTMP por quadra -----------------
+
+class StreamConfigUpdate(BaseModel):
+    stream_key: str | None = None  # nova stream key (não pode ser null)
+    rtmp_url: str | None = None  # nova URL rtmp://...; null volta à URL global
+
+
+def _stream_config_call(call, *args, **kwargs):
+    try:
+        return call(*args, **kwargs)
+    except stream_config.StreamConfigError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.get("/quadras/{quadra_id}/youtube", dependencies=[Depends(require_live_access)])
+def youtube_config_get(quadra_id: str):
+    """Destino da transmissão da quadra. A stream key NUNCA é devolvida (só os 4 últimos caracteres)."""
+    return _stream_config_call(stream_config.get, quadra_id)
+
+
+@app.put("/quadras/{quadra_id}/youtube", dependencies=[Depends(require_live_access)])
+def youtube_config_put(quadra_id: str, body: StreamConfigUpdate, request: Request):
+    """Troca a stream key e/ou a URL RTMP da quadra (o que vier no corpo; o resto não muda)."""
+    fields = body.model_fields_set
+    view, changed = _stream_config_call(
+        stream_config.update,
+        quadra_id,
+        body.stream_key if "stream_key" in fields else stream_config.UNSET,
+        body.rtmp_url if "rtmp_url" in fields else stream_config.UNSET,
+    )
+    if changed:  # auditoria: quem e o quê, nunca a key
+        who = getattr(request.state, "token_owner", "sessão do painel ou X-Live-Key")
+        print(f"[youtube] {quadra_id}: destino da transmissão alterado ({', '.join(sorted(fields))}) por {who}.")
+    return {"status": "atualizada" if changed else "sem_mudanca", **view}
+
+
+class StreamKeyUpdate(BaseModel):
+    stream_key: str | None = None  # obrigatório; null é recusado (a API troca a key, não a remove)
+
+
+class RtmpUrlUpdate(BaseModel):
+    rtmp_url: str | None = None  # obrigatório; null apaga a URL da quadra e volta à global
+
+
+def _audit(request: Request, quadra_id: str, what: str) -> None:
+    who = getattr(request.state, "token_owner", "sessão do painel ou X-Live-Key")
+    print(f"[youtube] {quadra_id}: {what} por {who}.")  # nunca a key
+
+
+@app.get("/quadras/{quadra_id}/youtube/key", dependencies=[Depends(require_live_access)])
+def youtube_key_get(quadra_id: str, request: Request):
+    """A stream key da quadra, INTEIRA (a rede é fechada e a rota exige token). Cada leitura é registrada no log."""
+    view = _stream_config_call(stream_config.get_key, quadra_id)
+    _audit(request, quadra_id, "stream key lida")
+    return view
+
+
+@app.put("/quadras/{quadra_id}/youtube/key", dependencies=[Depends(require_live_access)])
+def youtube_key_put(quadra_id: str, body: StreamKeyUpdate, request: Request):
+    """Troca a stream key da quadra (não vale com ela transmitindo)."""
+    if "stream_key" not in body.model_fields_set:
+        raise HTTPException(status_code=422, detail="informe stream_key.")
+    view, changed = _stream_config_call(stream_config.update_key, quadra_id, body.stream_key)
+    if changed:
+        _audit(request, quadra_id, "stream key alterada")
+    return {"status": "atualizada" if changed else "sem_mudanca", **view}
+
+
+@app.get("/quadras/{quadra_id}/youtube/url", dependencies=[Depends(require_live_access)])
+def youtube_url_get(quadra_id: str):
+    """A URL RTMP efetiva da quadra (a própria, ou a global do servidor)."""
+    return _stream_config_call(stream_config.get_url, quadra_id)
+
+
+@app.put("/quadras/{quadra_id}/youtube/url", dependencies=[Depends(require_live_access)])
+def youtube_url_put(quadra_id: str, body: RtmpUrlUpdate, request: Request):
+    """Troca a URL RTMP da quadra; `null` volta à global (não vale com ela transmitindo)."""
+    if "rtmp_url" not in body.model_fields_set:
+        raise HTTPException(status_code=422, detail="informe rtmp_url (use null para voltar à URL global).")
+    view, changed = _stream_config_call(stream_config.update_url, quadra_id, body.rtmp_url)
+    if changed:
+        _audit(request, quadra_id, "URL RTMP alterada")
+    return {"status": "atualizada" if changed else "sem_mudanca", **view}
 
 
 # --- Painel web ---------------------------------------------------------------

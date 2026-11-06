@@ -189,6 +189,9 @@ def _clean_name(raw: str, default: str) -> str:
 # --- ffmpeg ------------------------------------------------------------------
 
 ROW_Y = {"a": "h-190", "b": "h-124"}  # duas linhas de 52 px, 66 px entre elas
+# Cor da caixa do placar: grená (RGB 7B1E2B) a 85% de opacidade. Com 65% a cor se misturava ao fundo
+# (marrom sobre a quadra verde, roxo sobre a azul); a 85% lê como grená em qualquer fundo.
+SCOREBOARD_BOX_COLOR = "0x7B1E2B@0.85"
 
 
 def _video_filters(quadra_id: str) -> list[str]:
@@ -200,7 +203,7 @@ def _video_filters(quadra_id: str) -> list[str]:
         "scale=1920:1080",
         # ATENÇÃO: no drawbox `h` é a ALTURA DA CAIXA, não do vídeo (no drawtext é a do vídeo).
         # Por isso a posição vertical usa `ih`; com `h-228` a caixa ia para o topo (y=-48).
-        "drawbox=x=48:y=ih-228:w=700:h=180:color=black@0.65:t=fill",
+        f"drawbox=x=48:y=ih-228:w=700:h=180:color={SCOREBOARD_BOX_COLOR}:t=fill",
         f"drawtext=fontfile={font}:text=SETS:expansion=none:x=500:y=h-218:fontsize=22:fontcolor=0xBBBBBB",
         f"drawtext=fontfile={font}:text=PONTOS:expansion=none:x=610:y=h-218:fontsize=22:fontcolor=0xBBBBBB",
     ]
@@ -240,7 +243,8 @@ def _probe_audio(input_url: str) -> bool:
 
 
 def _ffmpeg_cmd(
-    quadra_id: str, input_url: str, stream_key: str, volume: int, has_audio: bool = True
+    quadra_id: str, input_url: str, stream_key: str, volume: int, has_audio: bool = True,
+    rtmp_url: str | None = None,
 ) -> list[str]:
     bitrate = config.BROADCAST_BITRATE
     # Câmera sem áudio: sem isto o ffmpeg sairia com "matches no streams" e o supervisor
@@ -261,7 +265,7 @@ def _ffmpeg_cmd(
         "-c:a", "aac", "-b:a", "128k",
         *([] if has_audio else ["-shortest"]),
         "-f", "flv", "-flvflags", "no_duration_filesize",
-        f"{config.YOUTUBE_RTMP_URL.rstrip('/')}/{stream_key}",
+        f"{(rtmp_url or config.YOUTUBE_RTMP_URL).rstrip('/')}/{stream_key}",
     ]
 
 
@@ -294,7 +298,9 @@ def _spawn(quadra_id: str, camera: dict, runtime: _Runtime, has_audio: bool) -> 
     if not has_audio:
         print(f"[broadcast] {quadra_id}: a câmera não tem áudio; a transmissão vai com silêncio.")
     cmd = _ffmpeg_cmd(
-        quadra_id, camera["input_url"], camera["youtube_stream_key"], st["volume"], has_audio
+        quadra_id, camera["input_url"], camera["youtube_stream_key"], st["volume"], has_audio,
+        # Só repassa quando a quadra tem URL própria: sem ela a chamada é idêntica à de antes.
+        **({"rtmp_url": camera["rtmp_url"]} if camera.get("rtmp_url") else {}),
     )
     # O FIFO é aberto em leitura+escrita: o ffmpeg nunca vê EOF no stdin, mesmo
     # que a API reinicie, e a API reabre só para escrita quando precisa.

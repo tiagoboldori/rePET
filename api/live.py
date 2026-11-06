@@ -77,9 +77,10 @@ def _write(input_url: str, enabled: bool, url: str) -> None:
     _isapi("PUT", input_url, _RTMP_XML.format(enabled=str(enabled).lower(), url=escape(url)))
 
 
-def _ingest_url(stream_key: str) -> str:
-    """URL do YouTube com o host trocado pelo IPv4 (a câmera não resolve DNS)."""
-    parsed = urlparse(config.YOUTUBE_RTMP_URL)
+def _ingest_url(stream_key: str, rtmp_url: str | None = None) -> str:
+    """URL do ingest com o host trocado pelo IPv4 (a câmera não resolve DNS). `rtmp_url` é o
+    destino da quadra; sem ele vale a global YOUTUBE_RTMP_URL."""
+    parsed = urlparse(rtmp_url or config.YOUTUBE_RTMP_URL)
     try:
         ip = socket.getaddrinfo(parsed.hostname, None, socket.AF_INET)[0][4][0]
     except OSError as exc:
@@ -133,9 +134,9 @@ def status(input_url: str) -> bool:
     return _read(input_url)[0]
 
 
-def start(quadra_id: str, input_url: str, stream_key: str) -> bool:
+def start(quadra_id: str, input_url: str, stream_key: str, rtmp_url: str | None = None) -> bool:
     """Liga a live. Retorna False se já estava no ar com essa stream key (idempotente)."""
-    url = _ingest_url(stream_key)
+    url = _ingest_url(stream_key, rtmp_url)
     with _lock:
         enabled, current = _read(input_url)
         if enabled and current == url:

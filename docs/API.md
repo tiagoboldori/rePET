@@ -23,6 +23,7 @@ A documentação interativa (Swagger), gerada pelo FastAPI, fica em
 - [Formato dos erros](#formato-dos-erros)
 - [Gravar replay](#gravar-replay)
 - [Subir a live no YouTube](#subir-a-live-no-youtube)
+- [Configurar o destino da transmissão (stream key e RTMP)](#configurar-o-destino-da-transmissão-stream-key-e-rtmp)
 - [Transmissão com placar](#transmissão-com-placar-broadcast)
 - [Estado geral](#estado-geral-get-status)
 - [Painel web](#painel-web)
@@ -39,6 +40,10 @@ A documentação interativa (Swagger), gerada pelo FastAPI, fica em
 | `POST /live/{quadra_id}` | `Bearer` | Liga a live no YouTube |
 | `POST /live/{quadra_id}/stop` ou `DELETE /live/{quadra_id}` | `Bearer` | Desliga a live |
 | `GET /live/{quadra_id}` | `Bearer` | Diz se a live está no ar |
+| `GET /quadras/{quadra_id}/youtube` | `Bearer` | Destino da transmissão da quadra (key mascarada e URL RTMP) |
+| `PUT /quadras/{quadra_id}/youtube` | `Bearer` | Troca a stream key e/ou a URL RTMP da quadra (não vale com ela no ar) |
+| `GET`/`PUT /quadras/{quadra_id}/youtube/key` | `Bearer` | Lê (**inteira**) e troca só a stream key |
+| `GET`/`PUT /quadras/{quadra_id}/youtube/url` | `Bearer` | Lê e troca só a URL RTMP (`null` volta à global) |
 | `POST /broadcast/{quadra_id}/start` | `Bearer` | Liga a transmissão **com placar** (até 2 ao mesmo tempo) |
 | `POST /broadcast/{quadra_id}/stop` ou `DELETE /broadcast/{quadra_id}` | `Bearer` | Encerra a transmissão com placar |
 | `POST /broadcast/{quadra_id}/ponto/{a\|b}` | `Bearer` | +1 ponto (`?delta=-1` corrige) |
@@ -230,7 +235,8 @@ ESPHome).
 A live é feita **pela própria câmera**: a API configura a câmera (ISAPI
 Hikvision) para empurrar o RTMP direto ao YouTube, sem passar vídeo pelo
 servidor. A stream key de cada quadra fica em `youtube_stream_key` no
-`config/cameras.json`.
+`config/cameras.json` e pode ser consultada e trocada pela
+[API de destino da transmissão](#configurar-o-destino-da-transmissão-stream-key-e-rtmp).
 
 Todas as rotas de live exigem `Authorization: Bearer <token>` (a `LIVE_API_KEY` ou o
 `REPLAY_API_TOKEN`; o mesmo token vale para todas as quadras; o header legado `X-Live-Key` também funciona). As rotas de `/live` e
@@ -343,6 +349,214 @@ Observações:
 
 ---
 
+## Configurar o destino da transmissão (stream key e RTMP)
+
+Cada quadra transmite para o destino cadastrado nela: a **stream key** (`youtube_stream_key`) e,
+opcionalmente, a **URL RTMP** (`rtmp_url`; sem ela vale a global `YOUTUBE_RTMP_URL`). Estas duas rotas
+leem e trocam esses valores no `config/cameras.json`, e valem para a live direta **e** para a
+transmissão com placar. Quem liga a transmissão continua **sem** enviar a key: ela é lida daqui.
+
+- A rota **combinada** abaixo nunca devolve a key inteira: o `GET` mostra só se existe e os 4 últimos
+  caracteres (e só se a key tiver 16 caracteres ou mais). Para ler a key inteira, use a rota
+  [`/youtube/key`](#rotas-separadas-só-a-key-só-a-url).
+- A troca vale **na hora** (a próxima vez que a quadra for ligada já usa o valor novo).
+- **Não é possível trocar com a quadra transmitindo** (live direta ou com placar): responde `409`.
+  Encerre a transmissão, troque e ligue de novo.
+- Exigem Bearer, como as demais rotas de controle. Quem trocou fica registrado no log do servidor
+  (`[youtube] ...`), sem a key.
+
+### Ver: `GET /quadras/{quadra_id}/youtube`
+
+```bash
+curl -s http://SERVIDOR:8000/quadras/loc1-quadra1/youtube \
+  -H "Authorization: Bearer SEU_TOKEN"
+```
+
+```json
+{
+  "quadra_id": "loc1-quadra1",
+  "tem_stream_key": true,
+  "stream_key_final": "qrst",
+  "rtmp_url": "rtmp://a.rtmp.youtube.com/live2",
+  "rtmp_url_padrao": true,
+  "rtmp_hosts_permitidos": ["youtube.com", "a.rtmp.youtube.com"],
+  "chave_compartilhada_com": [],
+  "chave_em_uso_por": null,
+  "no_ar": false
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `tem_stream_key` | A quadra tem key (sem ela, ligar qualquer modo dá `422`) |
+| `stream_key_final` | Últimos 4 caracteres da key, ou `null` (sem key, ou key curta demais para mostrar) |
+| `rtmp_url` | URL RTMP **efetiva** (a da quadra, ou a global) |
+| `rtmp_url_padrao` | `true` = a quadra usa a global; `false` = tem URL própria |
+| `rtmp_hosts_permitidos` | Hosts que o `PUT` aceita em `rtmp_url` (veja abaixo) |
+| `chave_compartilhada_com` | Outras quadras com a **mesma** key (permitido; só uma pode estar no ar por vez) |
+| `chave_em_uso_por` | Qual delas está no ar agora (`null` = nenhuma) |
+| `no_ar` | Esta quadra está transmitindo em algum modo (estado em cache, até ~15 s de atraso). Se `true`, o `PUT` dará `409` |
+
+### Trocar: `PUT /quadras/{quadra_id}/youtube`
+
+Corpo JSON; envie **pelo menos um** campo (o que não vier não muda):
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `stream_key` | string | Nova key: 8 a 128 caracteres entre letras, números, `-` e `_` (sem espaços). **Não pode ser `null`**: a API troca a key, não a remove |
+| `rtmp_url` | string ou `null` | Nova URL, no formato `rtmp://host[:porta][/app]`. **`null` apaga a URL da quadra** e volta à global |
+
+Regras da `rtmp_url` (existem porque o servidor e a câmera passam a empurrar o vídeo para lá):
+
+- só `rtmp://` (não `rtmps://`), sem usuário, senha, query ou fragmento; a key vai em `stream_key`, não na URL;
+- o host precisa estar na lista `rtmp_hosts_permitidos`: por padrão `youtube.com` e seus subdomínios
+  (`a.rtmp.youtube.com`, `b.rtmp.youtube.com`...), mais o host da `YOUTUBE_RTMP_URL` global. Para liberar
+  outro destino, quem administra o servidor acrescenta o domínio em `RTMP_ALLOWED_HOSTS` no `.env` e
+  reinicia a API. IP só vale se estiver listado por inteiro;
+- a URL é normalizada (host em minúsculas, sem `/` no fim).
+
+```bash
+# trocar só a key
+curl -s -X PUT http://SERVIDOR:8000/quadras/loc1-quadra2/youtube \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_key": "abcd-efgh-ijkl-mnop-qrst"}'
+
+# trocar key e servidor RTMP de uma vez
+curl -s -X PUT http://SERVIDOR:8000/quadras/loc1-quadra2/youtube \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_key": "abcd-efgh-ijkl-mnop-qrst", "rtmp_url": "rtmp://b.rtmp.youtube.com/live2"}'
+
+# voltar a quadra à URL global
+curl -s -X PUT http://SERVIDOR:8000/quadras/loc1-quadra2/youtube \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"rtmp_url": null}'
+```
+
+**Resposta `200`**: o mesmo objeto do `GET`, com `status` na frente: `"atualizada"`, ou `"sem_mudanca"`
+se o valor enviado já era o atual (nada é regravado).
+
+```json
+{
+  "status": "atualizada",
+  "quadra_id": "loc1-quadra2",
+  "tem_stream_key": true,
+  "stream_key_final": "qrst",
+  "rtmp_url": "rtmp://b.rtmp.youtube.com/live2",
+  "rtmp_url_padrao": false,
+  "rtmp_hosts_permitidos": ["youtube.com", "a.rtmp.youtube.com"],
+  "chave_compartilhada_com": [],
+  "chave_em_uso_por": null,
+  "no_ar": false
+}
+```
+
+**Erros**
+
+| Código | Quando | `detail` de exemplo |
+|---|---|---|
+| `401` / `503` | Token ausente/errado; nenhum token configurado | ver [Autenticação](#autenticação) |
+| `404` | `quadra_id` não está em `config/cameras.json` | `quadra_id 'x' não está em .../cameras.json.` |
+| `409` | A quadra está transmitindo | `'loc1-quadra2' está transmitindo; encerre a transmissão antes de trocar a key ou a URL RTMP.` |
+| `422` | Corpo sem `stream_key` nem `rtmp_url` | `informe stream_key e/ou rtmp_url.` |
+| `422` | `stream_key` nula | `stream_key não pode ser nula: a API troca a key, não a remove.` |
+| `422` | `stream_key` fora do formato | `stream_key inválida: use de 8 a 128 caracteres entre letras, números, '-' e '_' (sem espaços).` |
+| `422` | `rtmp_url` fora do formato ou com host não permitido | `host 'evil.example.com' não permitido; hosts aceitos: youtube.com, a.rtmp.youtube.com (ajuste RTMP_ALLOWED_HOSTS no servidor para liberar outro).` |
+| `422` | Tipo errado (ex.: `stream_key` numérica): `detail` é **lista** | ver [Formato dos erros](#formato-dos-erros) |
+| `500` | Não foi possível ler ou gravar o `cameras.json` | `não consegui gravar a configuração das câmeras.` |
+
+As mensagens de erro nunca repetem a key enviada. Se o `409` aparecer, consulte `GET /status` para ver
+em que modo a quadra está e encerre com `/live/{quadra_id}/stop` ou `/broadcast/{quadra_id}/stop`.
+
+### Rotas separadas: só a key, só a URL
+
+Além da rota combinada acima (que **não** devolve a key inteira), há uma rota para cada valor. As duas
+seguem as mesmas regras: Bearer, validação, `409` com a quadra transmitindo, gravação atômica e registro no
+log de quem leu/trocou (`[youtube] ...`, sem a key).
+
+| Rota | Para quê |
+|---|---|
+| `GET /quadras/{quadra_id}/youtube/key` | A stream key, **inteira** |
+| `PUT /quadras/{quadra_id}/youtube/key` | Troca a stream key |
+| `GET /quadras/{quadra_id}/youtube/url` | A URL RTMP efetiva |
+| `PUT /quadras/{quadra_id}/youtube/url` | Troca a URL RTMP (`null` volta à global) |
+
+> **Atenção:** `GET .../youtube/key` devolve a credencial do canal em claro. Foi uma decisão consciente
+> (a aplicação roda em rede fechada e a rota exige token), mas qualquer pessoa ou sistema que tenha um
+> token passa a poder ler a key, e ela aparecerá nas respostas e nos históricos de quem chamar. Cada leitura
+> fica registrada no log. Se um dia a aplicação sair da rede fechada, volte a usar só a rota combinada.
+
+#### Key: `GET` e `PUT /quadras/{quadra_id}/youtube/key`
+
+```bash
+curl -s http://SERVIDOR:8000/quadras/loc1-quadra1/youtube/key \
+  -H "Authorization: Bearer SEU_TOKEN"
+```
+
+```json
+{
+  "quadra_id": "loc1-quadra1",
+  "tem_stream_key": true,
+  "stream_key": "abcd-efgh-ijkl-mnop-qrst",
+  "chave_compartilhada_com": [],
+  "no_ar": false
+}
+```
+
+Quadra sem key: `"tem_stream_key": false` e `"stream_key": null`. `chave_compartilhada_com` lista as outras
+quadras com a mesma key; `no_ar: true` significa que o `PUT` dará `409`.
+
+```bash
+curl -s -X PUT http://SERVIDOR:8000/quadras/loc1-quadra1/youtube/key \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_key": "abcd-efgh-ijkl-mnop-qrst"}'
+```
+
+Corpo: `{"stream_key": "..."}`, **obrigatório**, 8 a 128 caracteres entre letras, números, `-` e `_`; `null` é
+recusado (a API troca a key, não a remove). Resposta `200`: o mesmo objeto do `GET` com `status` na frente
+(`"atualizada"` ou `"sem_mudanca"`).
+
+#### URL: `GET` e `PUT /quadras/{quadra_id}/youtube/url`
+
+```bash
+curl -s http://SERVIDOR:8000/quadras/loc1-quadra1/youtube/url \
+  -H "Authorization: Bearer SEU_TOKEN"
+```
+
+```json
+{
+  "quadra_id": "loc1-quadra1",
+  "rtmp_url": "rtmp://a.rtmp.youtube.com/live2",
+  "rtmp_url_padrao": true,
+  "rtmp_url_global": "rtmp://a.rtmp.youtube.com/live2",
+  "rtmp_hosts_permitidos": ["youtube.com", "a.rtmp.youtube.com"],
+  "no_ar": false
+}
+```
+
+`rtmp_url` é a efetiva; `rtmp_url_padrao: true` = a quadra usa a global (`rtmp_url_global`). Esta rota
+**nunca** mostra a key.
+
+```bash
+# URL própria da quadra
+curl -s -X PUT http://SERVIDOR:8000/quadras/loc1-quadra1/youtube/url \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"rtmp_url": "rtmp://b.rtmp.youtube.com/live2"}'
+
+# voltar à global
+curl -s -X PUT http://SERVIDOR:8000/quadras/loc1-quadra1/youtube/url \
+  -H "Authorization: Bearer SEU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"rtmp_url": null}'
+```
+
+Corpo: `{"rtmp_url": "rtmp://host[:porta][/app]"}` ou `{"rtmp_url": null}`, **obrigatório** (corpo sem o campo dá
+`422`). Só `rtmp://`, host em `rtmp_hosts_permitidos`, sem usuário/senha/query. Resposta `200`: o mesmo objeto
+do `GET` com `status` na frente.
+
+**Erros** (os mesmos da rota combinada, mais estes dois): `422` `informe stream_key.` e `422`
+`informe rtmp_url (use null para voltar à URL global).` quando o campo obrigatório falta.
+
+---
+
 ## Transmissão com placar (`/broadcast`)
 
 Diferente da live direta acima, aqui o **servidor reencoda o vídeo**: um ffmpeg
@@ -359,7 +573,8 @@ Use a live direta (`/live`) quando não precisar de placar; ela não gasta CPU.
 - **Sobrevive a reinício da API** (o ffmpeg roda destacado e é readotado), e se o
   ffmpeg cair, a API o relança sozinha (campo `reinicios`).
 
-Lados são sempre `a` e `b` (aceita maiúscula). O placar é simples: pontos e
+O placar aparece numa caixa **grená** no canto inferior esquerdo do vídeo (a cor vale quando a transmissão
+é iniciada ou relançada, não muda numa que já está no ar). Lados são sempre `a` e `b` (aceita maiúscula). O placar é simples: pontos e
 sets, números inteiros que **nunca ficam negativos** (valores abaixo de 0 viram 0).
 
 ### Todas as rotas `/broadcast`

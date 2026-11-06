@@ -474,3 +474,24 @@ def test_a_caixa_do_placar_fica_embaixo_junto_do_texto_e_nao_no_topo(bc):
     assert top_left > 250, f"há uma caixa no topo (média {top_left:.0f}); o fundo era branco"
     assert box_edge < 140, f"não há caixa escura embaixo (média {box_edge:.0f})"
     assert box_bottom < 255
+
+
+def test_a_caixa_do_placar_e_grena_e_nao_cinza(bc):
+    """Mede o RGB da caixa sobre dois fundos diferentes: tem que ser avermelhada (R bem acima de G e B)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("precisa de ffmpeg")
+    broadcast._write_overlay("q1")
+    chain = ",".join(broadcast._video_filters("q1"))
+    for fundo in ("0x3f7d4a", "0x2f5d8c"):  # quadra verde e quadra azul
+        raw = subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={fundo}:s=1920x1080:d=1",
+             "-vf", chain + ",format=rgb24", "-frames:v", "1", "-f", "rawvideo", "-"],
+            capture_output=True, check=True,
+        ).stdout
+        x, y = 56, 1080 - 150  # dentro da caixa, à esquerda do texto
+        r, g, b = raw[(y * 1920 + x) * 3: (y * 1920 + x) * 3 + 3]
+        assert r > g + 40 and r > b + 40, f"caixa não é grená sobre {fundo}: rgb=({r},{g},{b})"
+        assert r < 160, f"grená claro demais sobre {fundo}: rgb=({r},{g},{b})"

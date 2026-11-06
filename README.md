@@ -111,9 +111,16 @@ cp config/cameras.example.json config/cameras.json   # editar input_url reais
   "local_id": "loc1",
   "esporte": "futsal",
   "nome": "Quadra 1",
-  "input_url": "rtsp://user:senha@10.0.1.11:554/stream1"
+  "input_url": "rtsp://user:senha@10.0.1.11:554/stream1",
+  "youtube_stream_key": "xxxx-xxxx-xxxx-xxxx-xxxx",
+  "rtmp_url": "rtmp://a.rtmp.youtube.com/live2"
 }
 ```
+
+`youtube_stream_key` e `rtmp_url` são **opcionais**: sem a key a quadra não transmite (os endpoints de live
+respondem `422`), e sem `rtmp_url` vale a global `YOUTUBE_RTMP_URL`. Os dois podem ser lidos e trocados
+pela API (`GET`/`PUT /quadras/{id}/youtube`, veja [Exemplos de uso](#2-configurar-para-onde-a-quadra-transmite-stream-key-e-rtmp)),
+sem editar o arquivo à mão; a API reescreve o `cameras.json` de forma atômica. A rota combinada mostra a key mascarada; `GET /quadras/{id}/youtube/key` a devolve inteira.
 
 Usado pela API (valida `quadra_id`), por `scripts/generate_camera_envs.py`
 (gera os `.env` de systemd por câmera em `/etc/replay-system/cameras/` —
@@ -149,6 +156,239 @@ Prompt pronto para um agente integrar um painel de controle em outra aplicação
 
 Referência completa de rotas, com exemplos de `curl` (gravar replay, live direta, transmissão com placar, painel, consultar e apagar replays): [`docs/API.md`](docs/API.md). Como as duas modalidades de live funcionam, quando usar cada uma e os casos de borda: [`docs/LIVE.md`](docs/LIVE.md).
 
+### Começando em 2 minutos
+
+```bash
+export BASE=http://SERVIDOR:8000          # host/IP da máquina da API
+export TOKEN=SEU_TOKEN                     # veja "Autenticação" abaixo
+
+curl -s $BASE/health                       # {"status":"ok"}  (sem autenticação)
+curl -s $BASE/status -H "Authorization: Bearer $TOKEN"   # estado de todas as quadras
+```
+
+`200` no `/status` = token certo e API no ar. `401` = token errado. Para ler o JSON com mais
+conforto, acrescente `| python3 -m json.tool`. A documentação interativa (Swagger, com botão
+*Authorize*) está em `$BASE/docs`, e o contrato legível por máquina em `$BASE/openapi.json`.
+
+### Autenticação
+
+| Rotas | Como autenticar |
+|---|---|
+| `/status`, `/live/*`, `/broadcast/*`, `/quadras/*/youtube` | `Authorization: Bearer <token>` |
+| `POST /replay/*`, `GET /api/replays/*`, `GET /api/quadras/*/replays`, `GET /clips/*`, `GET /health` | nenhuma (abertas: o botão físico da quadra não tem como autenticar) |
+| `DELETE /api/replays/{id}` | HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`) |
+| `/painel` | login do painel web (cookie) |
+
+O **Bearer** aceita qualquer um destes tokens, todos equivalentes:
+
+| Token | Onde fica | Quando usar |
+|---|---|---|
+| Chave nomeada de integração | `API_TOKENS=nome:token,nome2:token2` no `.env` | **Uma por sistema que integra**: dá para revogar uma sem afetar as outras |
+| Chave da API de live | `LIVE_API_KEY` | Scripts internos (também vale no header legado `X-Live-Key`) |
+| Token do Lara | `REPLAY_API_TOKEN` (Sanctum, enviado inteiro, com o `id\|` na frente) | Quando o Lara prefere não guardar um segredo a mais |
+
+Gerar e cadastrar uma chave de integração (depois, reiniciar a API; para revogar, apagar o par):
+
+```bash
+python3 -c "import secrets; print('repet_live_' + secrets.token_urlsafe(32))"
+# no .env do servidor:  API_TOKENS=painel-web:repet_live_xxxxxxxxxxxx
+```
+
+Sem nenhum token configurado, essas rotas respondem `503`. Guarde o token só no **servidor** da
+aplicação que integra: a API não habilita CORS, então chamadas direto do navegador são bloqueadas
+(de propósito). O tráfego é HTTP puro; fora da rede interna, ponha um proxy HTTPS na frente.
+
+### Exemplos de uso
+
+Todos assumem `BASE` e `TOKEN` do início. Os valores das respostas são ilustrativos; o `quadra_id`
+vem de `GET /status`.
+
+#### 1. Ver as quadras e o que cada uma pode fazer
+
+```bash
+curl -s $BASE/status -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "quadras": [
+    {
+      "quadra_id": "loc1-quadra1", "nome": "Quadra 2", "esporte": "padel",
+      "tem_stream_key": true,
+      "chave_compartilhada_com": [], "chave_em_uso_por": null,
+      "modo": "nenhum",
+      "direta": { "no_ar": false, "erro": null, "verificado_ha_segundos": 7 },
+      "placar": { "quadra_id": "loc1-quadra1", "no_ar": false, "nomes": {"a": "DUPLA A", "b": "DUPLA B"},
+                  "placar": {"a": {"pontos": 0, "sets": 0}, "b": {"pontos": 0, "sets": 0}},
+                  "volume": 100, "transmitindo": false, "...": "..." }
+    }
+  ],
+  "transmissoes_com_placar": { "no_ar": 0, "limite": 2 }
+}
+```
+
+`modo` é `nenhum`, `placar`, `direta`, `conflito` ou `desconhecido`. Quadra com `tem_stream_key: false`
+não consegue transmitir até receber uma key (exemplo 2).
+
+#### 2. Configurar para onde a quadra transmite (stream key e RTMP)
+
+Quem liga a transmissão **não envia a key**: o servidor a lê do cadastro da quadra. Para ver e trocar
+esse cadastro:
+
+```bash
+# ver (esta rota combinada mostra a key mascarada: só os 4 últimos caracteres)
+curl -s $BASE/quadras/loc1-quadra2/youtube -H "Authorization: Bearer $TOKEN"
+# {"quadra_id":"loc1-quadra2","tem_stream_key":false,"stream_key_final":null,
+#  "rtmp_url":"rtmp://a.rtmp.youtube.com/live2","rtmp_url_padrao":true,
+#  "rtmp_hosts_permitidos":["youtube.com","a.rtmp.youtube.com"],
+#  "chave_compartilhada_com":[],"chave_em_uso_por":null,"no_ar":false}
+
+# cadastrar a key
+curl -s -X PUT $BASE/quadras/loc1-quadra2/youtube \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_key": "abcd-efgh-ijkl-mnop-qrst"}'
+# {"status":"atualizada","quadra_id":"loc1-quadra2","tem_stream_key":true,"stream_key_final":"qrst",...}
+
+# trocar key e servidor RTMP juntos
+curl -s -X PUT $BASE/quadras/loc1-quadra2/youtube \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_key": "abcd-efgh-ijkl-mnop-qrst", "rtmp_url": "rtmp://b.rtmp.youtube.com/live2"}'
+
+# voltar a quadra à URL RTMP global (null apaga a URL própria da quadra)
+curl -s -X PUT $BASE/quadras/loc1-quadra2/youtube \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"rtmp_url": null}'
+```
+
+**Uma rota para a key e outra para a URL**, quando você quer mexer em só uma:
+
+```bash
+# key: o GET devolve a key INTEIRA (rede fechada, exige token; cada leitura vai para o log)
+curl -s $BASE/quadras/loc1-quadra2/youtube/key -H "Authorization: Bearer $TOKEN"
+# {"quadra_id":"loc1-quadra2","tem_stream_key":true,"stream_key":"abcd-efgh-ijkl-mnop-qrst",
+#  "chave_compartilhada_com":[],"no_ar":false}
+curl -s -X PUT $BASE/quadras/loc1-quadra2/youtube/key \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_key": "abcd-efgh-ijkl-mnop-qrst"}'
+
+# URL RTMP: nunca mostra a key; null volta à global
+curl -s $BASE/quadras/loc1-quadra2/youtube/url -H "Authorization: Bearer $TOKEN"
+# {"quadra_id":"loc1-quadra2","rtmp_url":"rtmp://a.rtmp.youtube.com/live2","rtmp_url_padrao":true,
+#  "rtmp_url_global":"rtmp://a.rtmp.youtube.com/live2","rtmp_hosts_permitidos":[...],"no_ar":false}
+curl -s -X PUT $BASE/quadras/loc1-quadra2/youtube/url \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"rtmp_url": "rtmp://b.rtmp.youtube.com/live2"}'
+```
+
+Regras: a troca vale na hora; **não vale com a quadra transmitindo** (`409`: encerre antes); a key
+precisa ter 8 a 128 caracteres entre letras, números, `-` e `_`; a `rtmp_url` só aceita `rtmp://` com
+host em `RTMP_ALLOWED_HOSTS` (padrão `youtube.com`); a key não pode ser removida pela API.
+Detalhes e todos os erros em [`docs/API.md`](docs/API.md#configurar-o-destino-da-transmissão-stream-key-e-rtmp).
+
+#### 3. Transmitir um jogo com placar
+
+```bash
+Q=loc1-quadra1
+A="Authorization: Bearer $TOKEN"; J="Content-Type: application/json"
+
+# liga (efeito real: publica no YouTube). Demora alguns segundos; use timeout de 30 s
+curl -s -X POST $BASE/broadcast/$Q/start -H "$A" -H "$J" \
+  -d '{"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"}'
+# {"status":"iniciada","quadra_id":"loc1-quadra1","no_ar":true,"nomes":{"a":"ANA E BIA","b":"CRIS E DUDA"},
+#  "placar":{"a":{"pontos":0,"sets":0},"b":{"pontos":0,"sets":0}},"volume":100,
+#  "no_ar_ha_segundos":0,"encerra_em_segundos":7200,"transmitindo":false,"audio_da_camera":true,...}
+
+# durante o jogo (cada chamada devolve o estado já atualizado; o placar aparece no vídeo em < 1 s)
+curl -s -X POST $BASE/broadcast/$Q/ponto/a -H "$A"                 # +1 ponto para a dupla A
+curl -s -X POST "$BASE/broadcast/$Q/ponto/b?delta=-1" -H "$A"      # desfaz um ponto da dupla B
+curl -s -X POST $BASE/broadcast/$Q/set/a -H "$A"                   # A fechou o set: +1 set e zera os pontos
+curl -s -X PUT  $BASE/broadcast/$Q/placar -H "$A" -H "$J" \
+  -d '{"pontos_a": 40, "pontos_b": 15}'                            # correção manual
+curl -s -X PUT  $BASE/broadcast/$Q/nomes -H "$A" -H "$J" -d '{"nome_a": "Ana e Bia"}'
+curl -s -X PUT  $BASE/broadcast/$Q/volume -H "$A" -H "$J" -d '{"nivel": 130}'   # 100 = volume da câmera
+
+# acompanhar sem sobrecarregar (não consulta câmera; pode ser a cada ~2 s)
+curl -s $BASE/status -H "$A"
+
+# encerra (placar e nomes ficam guardados)
+curl -s -X POST $BASE/broadcast/$Q/stop -H "$A"
+```
+
+`placar`, `nomes` e `volume` também podem ser ajustados **com a transmissão desligada** (só gravam
+o valor). `ponto`, `set` e `volume/up|down` **não são idempotentes**: depois de um timeout, consulte o
+estado antes de repetir. O placar aparece numa caixa **grená** no canto inferior esquerdo.
+
+#### 4. Live direta (sem placar, a câmera é quem transmite)
+
+```bash
+curl -s -X POST $BASE/live/loc1-quadra1 -H "Authorization: Bearer $TOKEN"
+# {"quadra_id":"loc1-quadra1","status":"iniciada","max_seconds":7200.0}   (ou "ja_no_ar")
+
+curl -s -X POST $BASE/live/loc1-quadra1/stop -H "Authorization: Bearer $TOKEN"
+# {"quadra_id":"loc1-quadra1","status":"encerrada"}
+```
+
+Para saber se está no ar, prefira `direta.no_ar` do `/status`: o `GET /live/{id}` consulta a câmera na
+hora (pode levar ~10 s).
+
+#### 5. Replays: gravar, achar e baixar
+
+```bash
+# grava (é o que o botão físico chama; sem autenticação e sem corpo). Timeout generoso: 15 s
+curl -s -X POST $BASE/replay/loc1-quadra1 --max-time 15
+# {"quadra_id":"loc1-quadra1","clip_filename":"loc1-quadra1_20261027100537.mp4",
+#  "clip_url":"/clips/loc1-quadra1_20261027100537.mp4"}
+
+# lista os mais recentes (page_size de 1 a 100)
+curl -s "$BASE/api/quadras/loc1-quadra1/replays?page=1&page_size=5"
+
+# metadados e download (o id é o nome do arquivo sem .mp4)
+curl -s $BASE/api/replays/loc1-quadra1_20261027100537
+curl -o replay.mp4 $BASE/api/replays/loc1-quadra1_20261027100537/media
+```
+
+Uma segunda gravação na mesma quadra antes de 15 s responde `429`.
+
+#### 6. Erros que você vai encontrar
+
+O erro vem como `{"detail": "mensagem em português"}`; a única exceção é a validação automática
+(`422`), em que `detail` é uma **lista**.
+
+| Resposta | Significa | O que fazer |
+|---|---|---|
+| `401 {"detail":"Token inválido."}` | Bearer errado | Conferir o token |
+| `503 {"detail":"Nenhum token configurado (...)"}` | O servidor não tem nenhum token | Configurar `LIVE_API_KEY`, `REPLAY_API_TOKEN` ou `API_TOKENS` |
+| `404` | `quadra_id`/`replay_id` inexistente | Listar os ids em `GET /status` |
+| `409` ... `"encerre-a antes"` | Quadra em outro modo, limite de 2 transmissões, ou mesma stream key já no ar | Encerrar o que a mensagem indica |
+| `409` ... `"está transmitindo; encerre a transmissão antes de trocar"` | Troca de key/URL com a quadra no ar | Encerrar, trocar, ligar |
+| `422 {"detail":"a quadra não tem youtube_stream_key..."}` | Quadra sem key | `PUT /quadras/{id}/youtube` (exemplo 2) |
+| `422 {"detail":"host '...' não permitido; ..."}` | `rtmp_url` com host fora da lista | Ajustar `RTMP_ALLOWED_HOSTS` no servidor |
+| `502` | A câmera não respondeu | Verificar a câmera e tentar de novo |
+| `429` | Replay repetido em menos de 15 s | Esperar |
+
+#### 7. Em Python
+
+```python
+import os
+import requests
+
+BASE, QUADRA = os.environ["BASE"], "loc1-quadra1"
+H = {"Authorization": f"Bearer {os.environ['TOKEN']}"}
+
+def chamar(metodo, caminho, **kw):
+    r = requests.request(metodo, f"{BASE}{caminho}", headers=H, timeout=kw.pop("timeout", 10), **kw)
+    if not r.ok:                                  # detail é texto, ou lista no 422
+        raise RuntimeError(f"{r.status_code}: {r.json().get('detail')}")
+    return r.json()
+
+chamar("PUT", f"/quadras/{QUADRA}/youtube", json={"stream_key": "abcd-efgh-ijkl-mnop-qrst"})
+chamar("POST", f"/broadcast/{QUADRA}/start", json={"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"}, timeout=30)
+print(chamar("POST", f"/broadcast/{QUADRA}/ponto/a")["placar"])
+chamar("POST", f"/broadcast/{QUADRA}/stop")
+```
+
+### Referência rápida das rotas
+
 Público (sem autenticação):
 
 | Endpoint | Descrição |
@@ -166,12 +406,18 @@ Público (sem autenticação):
 | `GET /live/{quadra_id}` | `{no_ar: bool}`, lido direto da câmera (`enabled` do `/ISAPI/Custom/RTMP`). `502` se a câmera não responde |
 | `POST /live/{quadra_id}` | Liga a live: configura a **câmera** (ISAPI) para empurrar o RTMP direto ao YouTube, sem passar pelo servidor. Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; a API desliga a câmera após `LIVE_MAX_SECONDS`. `503` sem nenhum token configurado, `401` token errado, `422` sem stream key, `502` câmera/DNS com problema |
 | `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Desliga a live (o `POST` é para quem só consegue fazer POST) |
+| `GET /quadras/{quadra_id}/youtube` | Destino da transmissão da quadra: `tem_stream_key`, últimos 4 caracteres da key (esta rota nunca a mostra inteira), `rtmp_url` efetiva e hosts permitidos |
+| `GET` / `PUT /quadras/{quadra_id}/youtube/key` | Lê (a key **inteira**) e troca só a stream key. Cada leitura é registrada no log |
+| `GET` / `PUT /quadras/{quadra_id}/youtube/url` | Lê e troca só a URL RTMP (`null` volta à global); nunca mostra a key |
+| `PUT /quadras/{quadra_id}/youtube` | Troca `stream_key` e/ou `rtmp_url` (`null` volta à global) no `cameras.json`. Não vale com a quadra transmitindo (`409`); `rtmp_url` só `rtmp://` com host em `RTMP_ALLOWED_HOSTS` (`422`) |
 | `POST /broadcast/{quadra_id}/start` / `.../stop` | Liga/encerra a transmissão **com placar** (o servidor reencoda e desenha o overlay). Até 2 ao mesmo tempo (`409` na 3ª); `409` também se a quadra estiver em live direta |
 | `POST /broadcast/{quadra_id}/ponto/{a\|b}` · `.../set/{a\|b}` | +1 ponto (`?delta=-1` corrige) · +1 set e zera os pontos dos dois lados |
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` · `PUT .../volume` | Volume ao vivo, em % do da câmera (100 = original) |
 | `GET /broadcast`, `GET /broadcast/{quadra_id}`, `PUT .../placar`, `PUT .../nomes`, `POST .../placar/zerar` | Estado e correções manuais |
 | `GET /status` | Uma linha por quadra com os dois modos (direta e placar), sem consultar câmera na hora |
 | `GET /painel` | **Painel web** de controle da transmissão (login com `ADMIN_USERNAME`/`ADMIN_PASSWORD`) |
+
+### Como funciona na prática (live, placar, reboot, stream key)
 
 A live é da câmera (Hikvision, vídeo 1080p H.264 do stream principal + áudio AAC
 mono 16 kHz): sobrevive a reinício da API, a câmera reconecta sozinha se o RTMP
@@ -181,8 +427,9 @@ a cada `POST`); ao desligar, a URL é trocada por um placeholder, o que também
 apaga a stream key da câmera. Essa live direta não tem overlay.
 
 Para placar, use `/broadcast`: um ffmpeg por quadra lê o RTSP, reduz tudo a 1080p
-(a quadra2 entrega 1440p), desenha nomes/sets/pontos por cima e empurra o RTMP ao
-YouTube. Custo medido: ~1 a 1,5 núcleo e ~0,4 a 0,7 GB por transmissão (limite de
+(a quadra2 entrega 1440p), desenha nomes/sets/pontos por cima (numa caixa **grená**, constante
+`SCOREBOARD_BOX_COLOR` em `api/broadcast.py`; a cor vale quando a transmissão é iniciada ou
+relançada, não muda numa que já está no ar) e empurra o RTMP ao YouTube. Custo medido: ~1 a 1,5 núcleo e ~0,4 a 0,7 GB por transmissão (limite de
 2 simultâneas). O ffmpeg roda destacado: reiniciar só a API não o derruba (o
 `resume()` o readota) e, se ele cair, a API o relança. Se ficar vivo mas parar de
 produzir quadros (rede do YouTube, RTSP congelado), um watchdog o mata e relança
@@ -241,6 +488,7 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `FTP_PORT` / `FTP_BASE_DIR` / `FTP_TIMEOUT_SECONDS` | `21` / `Lara/Repet` / `60` | Porta, pasta do Lara no FTP e timeout |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Credencial do `DELETE`; vazio = sempre `401` |
 | `LIVE_API_KEY` | vazio | Token das rotas `/live`, `/broadcast` e `/status`: `Authorization: Bearer` (ou o legado `X-Live-Key`). O `REPLAY_API_TOKEN` e as chaves nomeadas de `API_TOKENS` (`nome:token,...`, uma por integração) também são aceitos no Bearer; sem nenhum = `503` |
+| `API_TOKENS` | vazio | Chaves nomeadas de integração, `nome:token,nome2:token2` (uma por sistema; revogue apagando o par). Valem no `Authorization: Bearer` das rotas de controle |
 | `LIVE_MAX_SECONDS` | `7200` | Desliga a live na câmera depois desse tempo; `0` = sem limite |
 | `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
 | `BROADCAST_MAX_CONCURRENT` / `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `2` / `ultrafast` / `4500k` / `4` | Transmissão com placar: simultâneas, preset x264, bitrate e núcleos por transmissão |
@@ -249,7 +497,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do `volume/up\|down` e teto, em % |
 | `LIVE_MONITOR_INTERVAL_SECONDS` | `15` | Intervalo da verificação (em segundo plano) das lives diretas nas câmeras |
 | `PANEL_SESSION_HOURS` / `PANEL_SECRET` | `12` / vazio | Validade da sessão do painel; segredo extra que assina o cookie |
-| `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube |
+| `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube (cada quadra pode ter o seu em `rtmp_url` no `cameras.json`, trocável por `PUT /quadras/{id}/youtube`) |
+| `RTMP_ALLOWED_HOSTS` | `youtube.com` | Domínios aceitos no `rtmp_url` de uma quadra via API (mais o host da `YOUTUBE_RTMP_URL`) |
 | `BUFFER_ROOT` | `/var/replay` | Segmentos brutos (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) |
 | `OUTPUT_DIR` | `/var/replay/output` | Clipes finais (`<quadra_id>_<timestamp>.mp4`, mais variantes `_oriented`/`_overlay`) |
 | `CAMERAS_FILE` | `config/cameras.json` | Registro de câmeras |
@@ -271,7 +520,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 ## Estrutura
 
 ```
-api/            FastAPI: POST /replay, endpoints /api/*, /quadra, /clips, /health
+api/            FastAPI: POST /replay, /api/*, /quadra, /clips, /health, /live, /broadcast, /status,
+                /quadras/{id}/youtube (auth.py: Bearer; stream_config.py: key e RTMP por quadra)
 capture/        capture_camera.sh — captura contínua de UMA câmera
 clipper/        clip_generator.py — corte dos últimos N s (+ ffprobe helpers)
 db/             SQLite (WAL): modelos Local/Esporte/Quadra/Replay, migração de
@@ -336,7 +586,7 @@ deploy não usar `/opt/replay-system`.
 ### Testes
 
 ```bash
-python -m pytest test/ -v         # db, reconcile, retenção local, integração externa
+python -m pytest test/ -v         # db, reconcile, retenção local, integração externa, auth, live, placar, destino da transmissão
 bash test/run_pipeline_test.sh    # captura + corte, fonte sintética (ffmpeg testsrc)
 bash test/run_api_test.sh         # uvicorn + curl ponta a ponta, banco isolado
 ```
@@ -393,6 +643,8 @@ iniciar; (3) só então replicar pros 8 e passar à perfboard.
 | Persistência SQLite, reconciliação disco→banco, retenção local | ✅ |
 | Integração externa (sync, orientação, overlay, música, fila com backoff, heartbeat, diagnóstico) | ✅ 1º envio confirmado em 2026-10-05; auditada campo a campo contra a especificação |
 | `recorded_at` em horário local com offset | ✅ corrigido; confirmar na plataforma após fila represada |
+| Autenticação Bearer (`LIVE_API_KEY`, `REPLAY_API_TOKEN`, `API_TOKENS`) nas rotas de controle | ✅ em produção; `X-Live-Key` e o cookie do painel seguem valendo |
+| Configurar stream key e URL RTMP por quadra via API (`GET`/`PUT /quadras/{id}/youtube`) | ✅ testado em instância isolada e por testes automatizados; a troca nunca vale com a quadra no ar |
 | Supervisão (watchdog em bash + units systemd) | ✅ watchdog em uso; units não instalados |
 | Botão físico definitivo (ESP32 + W5500) | 🔶 lógica validada com ESP8266; falta o hardware definitivo e replicar por local |
 | Contrato completo da API externa (`docs/replay-api.md`) | ⚠️ nunca lido; implementação baseada na especificação resumida |

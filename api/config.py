@@ -122,6 +122,19 @@ def parse_api_tokens(raw: str) -> dict[str, str]:
 # REPLAY_API_TOKEN). Valem como `Authorization: Bearer` nas rotas /live, /broadcast e /status.
 API_TOKENS = parse_api_tokens(os.environ.get("API_TOKENS", ""))
 YOUTUBE_RTMP_URL = os.environ.get("YOUTUBE_RTMP_URL", "rtmp://a.rtmp.youtube.com/live2")
+# Domínios (e seus subdomínios) que `PUT /quadras/{id}/youtube` aceita como destino RTMP de uma
+# quadra, além do host de YOUTUBE_RTMP_URL. Existe porque o servidor e a câmera passam a empurrar
+# o vídeo para onde esta URL apontar. IP só vale se estiver listado por inteiro.
+RTMP_ALLOWED_HOSTS = [
+    h.strip().lower().strip(".")
+    for h in os.environ.get("RTMP_ALLOWED_HOSTS", "youtube.com").split(",")
+    if h.strip().strip(".")
+]
+
+
+def rtmp_url_for(camera: dict) -> str:
+    """URL RTMP de uma quadra: `rtmp_url` do cameras.json, senão a global YOUTUBE_RTMP_URL."""
+    return camera.get("rtmp_url") or YOUTUBE_RTMP_URL
 # Desliga a live na câmera depois desse tempo (0 = sem limite); o prazo é gravado
 # em LIVE_STATE_FILE para sobreviver a reinício da API.
 LIVE_MAX_SECONDS = float(os.environ.get("LIVE_MAX_SECONDS", "7200"))

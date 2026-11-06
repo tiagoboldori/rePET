@@ -26,6 +26,11 @@ nada por cima, ou quando o servidor estiver ocupado: live direta, que não gasta
 
 Os dois podem ser operados pelo [painel web](API.md#painel-web) (`/painel`) ou pela API.
 
+**Para onde cada quadra transmite.** O destino (stream key e, se quiser, URL RTMP) fica no cadastro da
+quadra e pode ser consultado e trocado pela API, sem editar arquivo:
+[`GET`/`PUT /quadras/{id}/youtube`](API.md#configurar-o-destino-da-transmissão-stream-key-e-rtmp), ou só a key (`.../youtube/key`) ou só a URL (`.../youtube/url`). A troca
+vale para os dois modos e **não é aceita com a quadra no ar** (`409`).
+
 ---
 
 ## Live direta: a câmera empurra o RTMP
@@ -63,6 +68,10 @@ câmera ──RTSP──▶ ffmpeg ──RTMP──▶ YouTube
    API ── FIFO (stdin do ffmpeg): comandos de volume e o 'q' para encerrar
 ```
 
+- **Visual.** Nomes, sets e pontos ficam numa caixa **grená** (RGB `7B1E2B`, 85% de opacidade) no canto
+  inferior esquerdo; a constante é `SCOREBOARD_BOX_COLOR` em `api/broadcast.py`. A cor é definida na linha de
+  comando do ffmpeg, então **vale na próxima vez que a transmissão for iniciada ou relançada**: uma
+  transmissão que já está no ar continua com a cor com que subiu (reiniciar só a API a readota sem trocá-la).
 - **Placar.** A API só regrava seis arquivos de uma linha em
   `.data/broadcast/{quadra}/` (`nome_a`, `sets_a`, `pontos_a`, idem `b`) e o ffmpeg os
   relê a cada quadro (`drawtext textfile=…:reload=1`): a mudança aparece em menos de 1 s.
@@ -161,7 +170,9 @@ Todas em `.env` (modelo em `.env.example`); mudar exige reiniciar a API.
 |---|---|---|
 | `LIVE_API_KEY` | vazio | Token das rotas de controle (`Authorization: Bearer`, ou o legado `X-Live-Key`). O `REPLAY_API_TOKEN` e as chaves de `API_TOKENS` também valem no Bearer; sem nenhum = `503` |
 | `LIVE_MAX_SECONDS` | `7200` | Prazo de qualquer live; `0` = sem limite |
-| `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube |
+| `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube; cada quadra pode ter o seu em `rtmp_url` no `cameras.json` (trocável por `PUT /quadras/{id}/youtube`) |
+| `RTMP_ALLOWED_HOSTS` | `youtube.com` | Domínios (e subdomínios) que o `PUT` aceita como `rtmp_url` de uma quadra, além do host da `YOUTUBE_RTMP_URL`; IP só vale por inteiro |
+| `API_TOKENS` | vazio | Chaves nomeadas de integração (`nome:token,nome2:token2`), válidas no Bearer das rotas de controle |
 | `BROADCAST_MAX_CONCURRENT` | `2` | Transmissões com placar simultâneas |
 | `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `ultrafast` / `4500k` / `4` | Encode: preset x264, bitrate (sempre `<n>k`) e núcleos por transmissão |
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do volume e teto (%) |
