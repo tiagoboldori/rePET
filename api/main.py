@@ -154,6 +154,7 @@ def _serialize_replay(replay: Replay) -> dict:
 @app.post("/replay/{quadra_id}")
 def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
     """Corta o clipe dos últimos N segundos da quadra, até o instante da chamada."""
+    now = datetime.now()  # instante do botão: o clipe termina aqui
     cameras = config.load_cameras()
     if quadra_id not in cameras:
         raise HTTPException(
@@ -164,7 +165,6 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
             ),
         )
 
-    now = datetime.now()
     with _trigger_lock:
         last = _last_trigger.get(quadra_id)
         if last is not None:
@@ -199,6 +199,8 @@ def trigger_replay(quadra_id: str, session: Session = Depends(get_session)):
             segment_time=config.SEGMENT_TIME,
             safety_margin=config.SAFETY_MARGIN,
             max_staleness_seconds=config.MAX_STALENESS_SECONDS,
+            trigger_time=now,
+            max_wait_seconds=config.CLIP_WAIT_TIMEOUT_SECONDS,
         )
     except ClipGenerationError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -56,8 +56,9 @@ Resposta `200`:
 ```
 
 O `replay_id` é o nome do arquivo sem `.mp4` (`loc1-quadra1_20261027100537`).
-Quem chama deve usar timeout generoso (o corte leva alguns segundos; 15 s no
-ESPHome).
+O clipe termina no instante do clique: a API espera o segmento daquele
+instante fechar (até ~2 s) antes de cortar. Quem chama deve usar timeout
+generoso (o corte leva alguns segundos; 15 s no ESPHome).
 
 | Código | Quando |
 |---|---|

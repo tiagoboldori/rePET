@@ -21,6 +21,14 @@ CLIP_DURATION_SECONDS = float(os.environ.get("CLIP_DURATION_SECONDS", "35"))
 SEGMENT_TIME = int(os.environ.get("SEGMENT_TIME", "2"))
 SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN", "0.5"))
 
+# Quanto o corte espera, depois do botão, o segmento daquele instante fechar
+# (o clipe termina no clique, não no último segmento já fechado). Estourou,
+# termina no último segmento fechado. Precisa ser maior que o intervalo entre
+# keyframes da câmera.
+CLIP_WAIT_TIMEOUT_SECONDS = float(
+    os.environ.get("CLIP_WAIT_TIMEOUT_SECONDS", str(2 * SEGMENT_TIME + 2))
+)
+
 # Intervalo mínimo entre dois acionamentos da mesma quadra; antes disso
 # a API responde 429 (evita clique duplo/repique do botão).
 TRIGGER_COOLDOWN_SECONDS = float(os.environ.get("TRIGGER_COOLDOWN_SECONDS", "15"))

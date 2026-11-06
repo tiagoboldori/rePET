@@ -180,9 +180,13 @@ sem configurar, responde `401` sempre):
 |---|---|
 | `DELETE /api/replays/{replay_id}` | Remove registro e arquivos (`204`; `404` se não existe) |
 
-O corte usa `-c copy`, então cai no keyframe anterior ao ponto pedido: o
-clipe pode sair um pouco mais longo que `CLIP_DURATION_SECONDS`, nunca
-mais curto. Clientes (inclusive o firmware) devem usar timeout generoso
+O clipe termina no instante em que a API recebe o clique: o corte espera
+o segmento daquele instante fechar (até ~`SEGMENT_TIME` s a mais na
+resposta, no máximo `CLIP_WAIT_TIMEOUT_SECONDS`) e apara o excedente. Se
+a câmera não entregar o segmento nesse prazo, o clipe termina no último
+segmento fechado. O corte usa `-c copy`, então o início cai no keyframe
+anterior ao ponto pedido: o clipe pode sair um pouco mais longo que
+`CLIP_DURATION_SECONDS`, nunca mais curto. Clientes (inclusive o firmware) devem usar timeout generoso
 (15s no ESPHome).
 
 ## Configuração
@@ -211,6 +215,7 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `CLIP_DURATION_SECONDS` | `35` | Duração do corte |
 | `SEGMENT_TIME` | `2` | Deve bater com `capture_camera.sh` |
 | `SAFETY_MARGIN` | `0.5` | Margem (s) para considerar um segmento fechado |
+| `CLIP_WAIT_TIMEOUT_SECONDS` | `2 × SEGMENT_TIME + 2` | Quanto o corte espera o segmento do clique fechar; precisa ser maior que o intervalo entre keyframes da câmera |
 | `MAX_STALENESS_SECONDS` | ~13 | Segmento fechado mais velho que isso ⇒ corte falha (`500`) em vez de entregar clipe velho (câmera travada) |
 | `TRIGGER_COOLDOWN_SECONDS` | `15` | Intervalo mínimo por quadra |
 | `OVERLAY_CACHE_DIR` | `/var/replay/overlays` | Cache local dos overlays da plataforma |

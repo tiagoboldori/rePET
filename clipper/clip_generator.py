@@ -5,6 +5,10 @@ gravado por capture_camera.sh. Também pode ser usado via CLI.
 O segmento mais recente pode ainda estar sendo escrito pelo ffmpeg. Como o
 `-f segment` escreve um arquivo por vez, só o último é tratado como aberto;
 `safety_margin` é só uma folga extra para diferença de relógio.
+
+O clipe termina no instante do acionamento (`trigger_time`), não no último
+segmento fechado: o corte espera o segmento que contém esse instante fechar
+(no máximo ~1 segmento) e então apara o excedente.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -61,6 +66,49 @@ def list_closed_segments(
     # Folga pequena contra relógio adiantado ou escrita lenta em disco.
     cutoff = now - timedelta(seconds=safety_margin)
     return [s for s in closed if s.start_time <= cutoff]
+
+
+def wait_for_segment_after(
+    buffer_dir: Path,
+    trigger_time: datetime,
+    timeout_seconds: float,
+    poll_seconds: float = 0.1,
+) -> bool:
+    """Espera abrir um segmento que começa depois de `trigger_time`.
+
+    Quando ele aparece, o anterior (que contém o instante do acionamento) já
+    foi fechado pelo ffmpeg. O nome do segmento é truncado ao segundo, então
+    `start_time > trigger_time` garante que o início real também é posterior.
+    Devolve False se estourar o prazo (câmera parada/lenta).
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        segments = [
+            seg for p in buffer_dir.glob("seg_*.mp4") if (seg := _parse_segment(p)) is not None
+        ]
+        if segments and max(s.start_time for s in segments) > trigger_time:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_seconds)
+
+
+def compute_cut_window(
+    total_seconds: float,
+    last_segment_end: datetime,
+    trigger_time: datetime,
+    duration_seconds: float,
+) -> tuple[float, float]:
+    """(início, fim) em segundos, na linha do tempo do arquivo concatenado.
+
+    O fim do arquivo corresponde a `last_segment_end` (relógio de parede); o
+    clipe acaba em `trigger_time`, ou no fim do arquivo se o acionamento for
+    mais recente que o que foi gravado.
+    """
+    end_wall = min(trigger_time, last_segment_end)
+    end = total_seconds - (last_segment_end - end_wall).total_seconds()
+    end = min(max(end, 0.0), total_seconds)
+    return max(end - duration_seconds, 0.0), end
 
 
 def select_segments_for_duration(
@@ -152,15 +200,33 @@ def generate_clip(
     segment_time: int = 2,
     safety_margin: float = 0.5,
     max_staleness_seconds: float | None = None,
+    trigger_time: datetime | None = None,
+    max_wait_seconds: float | None = None,
 ) -> Path:
-    """Gera o clipe dos últimos `duration_seconds` da quadra em `output_dir` e devolve o caminho."""
+    """Gera o clipe dos `duration_seconds` que terminam em `trigger_time` (padrão: agora).
+
+    Espera até `max_wait_seconds` o segmento que contém `trigger_time` fechar;
+    se estourar, o clipe termina no último segmento fechado.
+    """
     buffer_dir = Path(buffer_root) / quadra_id
     if not buffer_dir.is_dir():
         raise ClipGenerationError(f"Diretório de buffer não existe: {buffer_dir}")
 
+    trigger_time = trigger_time or datetime.now()
+    if max_wait_seconds is None:
+        max_wait_seconds = 2 * segment_time + 2
+    if not wait_for_segment_after(buffer_dir, trigger_time, max_wait_seconds):
+        print(
+            f"[clip_generator] aviso: segmento do acionamento não fechou em "
+            f"{max_wait_seconds:.0f}s — clipe termina no último segmento fechado.",
+            file=sys.stderr,
+        )
+
     now = datetime.now()
     closed = list_closed_segments(buffer_dir, safety_margin, now=now)
-    selected = select_segments_for_duration(closed, duration_seconds, segment_time)
+    # Os segmentos fechados depois do acionamento não entram na janela útil.
+    waited = max((now - trigger_time).total_seconds(), 0.0)
+    selected = select_segments_for_duration(closed, duration_seconds + waited, segment_time)
 
     # Buffer parado (câmera travada com a captura rodando) não pode
     # virar um clipe velho com status de sucesso.
@@ -199,13 +265,20 @@ def generate_clip(
             ]
         )
 
-        # 2) Corte dos últimos `duration_seconds`. Com `-c copy` o corte cai
-        #    no keyframe anterior, então o clipe pode sair um pouco mais
-        #    longo. Só vale com câmeras em H.264; HEVC exigiria reencode.
+        # 2) Corte dos `duration_seconds` que terminam no acionamento. O fim
+        #    cai no frame exato; com `-c copy` o início cai no keyframe
+        #    anterior, então o clipe pode sair um pouco mais longo. Só vale
+        #    com câmeras em H.264; HEVC exigiria reencode.
+        start, end = compute_cut_window(
+            probe_duration_seconds(temp_concat),
+            datetime.fromtimestamp(selected[-1].path.stat().st_mtime),
+            trigger_time,
+            duration_seconds,
+        )
         _run(
             [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
-                "-sseof", f"-{duration_seconds}",
+                "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
                 "-i", str(temp_concat),
                 "-c", "copy",
                 str(final_clip),
