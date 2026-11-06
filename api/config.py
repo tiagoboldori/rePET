@@ -127,6 +127,17 @@ BROADCAST_STATE_FILE = Path(
 )
 BROADCAST_LOG_DIR = Path(os.environ.get("BROADCAST_LOG_DIR", str(_ROOT / "logs")))
 
+# --- Verificação periódica das lives diretas (e na subida) --------------------
+# Com que frequência a API pergunta às câmeras se estão empurrando RTMP.
+LIVE_MONITOR_INTERVAL_SECONDS = float(os.environ.get("LIVE_MONITOR_INTERVAL_SECONDS", "15"))
+
+# --- Painel web (/painel) ----------------------------------------------------
+# Login com ADMIN_USERNAME/ADMIN_PASSWORD (os mesmos do DELETE). Sem eles o login
+# responde 503. PANEL_SECRET é opcional: mistura-se à senha na chave que assina a
+# sessão (trocar a senha ou o segredo desloga todo mundo).
+PANEL_SECRET = os.environ.get("PANEL_SECRET", "")
+PANEL_SESSION_HOURS = float(os.environ.get("PANEL_SESSION_HOURS", "12"))
+
 
 def load_cameras() -> dict[str, dict]:
     """Carrega config/cameras.json, indexado por quadra_id."""

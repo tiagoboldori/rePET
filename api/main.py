@@ -13,10 +13,11 @@ Dev: uvicorn api.main:app --reload --port 8000
 """
 import secrets
 import threading
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -24,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from api import broadcast, config, live
+from api import broadcast, config, live, monitor, panel
 from clipper.clip_generator import (
     ClipGenerationError,
     generate_clip,
@@ -46,8 +47,12 @@ async def lifespan(app: FastAPI):
         if recuperados:
             print(f"[api] reconciliação: {recuperados} replay(s) recuperado(s) do disco.")
     live.resume(config.load_cameras())
-    broadcast.resume(config.load_cameras())
+    cameras = config.load_cameras()
+    resumed = broadcast.resume(cameras)
+    print(f"[startup] transmissões com placar: {resumed}")
+    monitor.start(config.load_cameras)  # verifica as lives diretas em segundo plano
     yield
+    monitor.shutdown()
     live.cancel_timers()
     broadcast.detach()  # os ffmpeg das transmissões seguem no ar; resume() os readota
 
@@ -91,6 +96,21 @@ def require_live_key(x_live_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Chave inválida.")
 
 
+def require_live_access(request: Request, x_live_key: str | None = Header(default=None)) -> None:
+    """Chave X-Live-Key (scripts) OU sessão do painel (cookie). Com cookie, o que muda
+    algo exige também o header X-Painel: 1 (defesa contra CSRF)."""
+    if x_live_key:
+        require_live_key(x_live_key)
+        return
+    if panel.verify_token(request.cookies.get(panel.COOKIE)):
+        if request.method not in ("GET", "HEAD") and request.headers.get("x-painel") != "1":
+            raise HTTPException(status_code=403, detail="Falta o header X-Painel.")
+        return
+    if not config.LIVE_API_KEY and not panel.configured():
+        raise HTTPException(status_code=503, detail="LIVE_API_KEY não configurada.")
+    raise HTTPException(status_code=401, detail="Chave inválida ou sessão ausente.")
+
+
 def _live_camera(quadra_id: str) -> dict:
     camera = config.load_cameras().get(quadra_id)
     if camera is None:
@@ -101,7 +121,7 @@ def _live_camera(quadra_id: str) -> dict:
     return camera
 
 
-@app.get("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
+@app.get("/live/{quadra_id}", dependencies=[Depends(require_live_access)])
 def live_status(quadra_id: str):
     """Diz se a câmera está empurrando a live (lê o estado direto da câmera)."""
     camera = _live_camera(quadra_id)
@@ -111,7 +131,7 @@ def live_status(quadra_id: str):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.post("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
+@app.post("/live/{quadra_id}", dependencies=[Depends(require_live_access)])
 def start_live(quadra_id: str):
     """Liga o RTMP da câmera para o YouTube (idempotente)."""
     camera = _live_camera(quadra_id)
@@ -130,6 +150,7 @@ def start_live(quadra_id: str):
         started = live.start(quadra_id, camera["input_url"], stream_key)
     except live.LiveError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    monitor.mark(quadra_id, True)
     return {
         "quadra_id": quadra_id,
         "status": "iniciada" if started else "ja_no_ar",
@@ -137,8 +158,8 @@ def start_live(quadra_id: str):
     }
 
 
-@app.post("/live/{quadra_id}/stop", dependencies=[Depends(require_live_key)])
-@app.delete("/live/{quadra_id}", dependencies=[Depends(require_live_key)])
+@app.post("/live/{quadra_id}/stop", dependencies=[Depends(require_live_access)])
+@app.delete("/live/{quadra_id}", dependencies=[Depends(require_live_access)])
 def stop_live(quadra_id: str):
     """Desliga o RTMP da câmera."""
     camera = _live_camera(quadra_id)
@@ -146,6 +167,7 @@ def stop_live(quadra_id: str):
         stopped = live.stop(quadra_id, camera["input_url"])
     except live.LiveError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    monitor.mark(quadra_id, False)
     return {"quadra_id": quadra_id, "status": "encerrada" if stopped else "nao_estava_no_ar"}
 
 
@@ -183,18 +205,18 @@ def _bc(quadra_id: str, call, *args):
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
 
-@app.get("/broadcast", dependencies=[Depends(require_live_key)])
+@app.get("/broadcast", dependencies=[Depends(require_live_access)])
 def broadcast_list():
     """Todas as transmissões com placar (e o limite simultâneo)."""
     return broadcast.list_all()
 
 
-@app.get("/broadcast/{quadra_id}", dependencies=[Depends(require_live_key)])
+@app.get("/broadcast/{quadra_id}", dependencies=[Depends(require_live_access)])
 def broadcast_status(quadra_id: str):
     return _bc(quadra_id, broadcast.snapshot)
 
 
-@app.post("/broadcast/{quadra_id}/start", dependencies=[Depends(require_live_key)])
+@app.post("/broadcast/{quadra_id}/start", dependencies=[Depends(require_live_access)])
 def broadcast_start(quadra_id: str, body: BroadcastStart | None = None):
     """Liga a transmissão com placar (idempotente). Corpo opcional: nomes e reset."""
     camera = _live_camera(quadra_id)
@@ -218,42 +240,42 @@ def broadcast_start(quadra_id: str, body: BroadcastStart | None = None):
     return {"status": "iniciada" if started else "ja_no_ar", **broadcast.snapshot(quadra_id)}
 
 
-@app.post("/broadcast/{quadra_id}/stop", dependencies=[Depends(require_live_key)])
-@app.delete("/broadcast/{quadra_id}", dependencies=[Depends(require_live_key)])
+@app.post("/broadcast/{quadra_id}/stop", dependencies=[Depends(require_live_access)])
+@app.delete("/broadcast/{quadra_id}", dependencies=[Depends(require_live_access)])
 def broadcast_stop(quadra_id: str):
     stopped = _bc(quadra_id, broadcast.stop)
     return {"status": "encerrada" if stopped else "nao_estava_no_ar", **broadcast.snapshot(quadra_id)}
 
 
-@app.post("/broadcast/{quadra_id}/ponto/{lado}", dependencies=[Depends(require_live_key)])
+@app.post("/broadcast/{quadra_id}/ponto/{lado}", dependencies=[Depends(require_live_access)])
 def broadcast_point(quadra_id: str, lado: str, delta: int = 1):
     """+1 ponto no lado 'a' ou 'b' (delta=-1 corrige um erro)."""
     return _bc(quadra_id, broadcast.add_point, lado, delta)
 
 
-@app.post("/broadcast/{quadra_id}/set/{lado}", dependencies=[Depends(require_live_key)])
+@app.post("/broadcast/{quadra_id}/set/{lado}", dependencies=[Depends(require_live_access)])
 def broadcast_set(quadra_id: str, lado: str, delta: int = 1):
     """+1 set no lado e zera os pontos dos dois (delta=-1 só tira um set)."""
     return _bc(quadra_id, broadcast.add_set, lado, delta)
 
 
-@app.put("/broadcast/{quadra_id}/placar", dependencies=[Depends(require_live_key)])
+@app.put("/broadcast/{quadra_id}/placar", dependencies=[Depends(require_live_access)])
 def broadcast_score(quadra_id: str, body: BroadcastScore):
     """Correção manual: grava exatamente os valores enviados."""
     return _bc(quadra_id, broadcast.set_score, body.model_dump())
 
 
-@app.post("/broadcast/{quadra_id}/placar/zerar", dependencies=[Depends(require_live_key)])
+@app.post("/broadcast/{quadra_id}/placar/zerar", dependencies=[Depends(require_live_access)])
 def broadcast_reset_score(quadra_id: str):
     return _bc(quadra_id, broadcast.reset_score)
 
 
-@app.put("/broadcast/{quadra_id}/nomes", dependencies=[Depends(require_live_key)])
+@app.put("/broadcast/{quadra_id}/nomes", dependencies=[Depends(require_live_access)])
 def broadcast_names(quadra_id: str, body: BroadcastNames):
     return _bc(quadra_id, broadcast.set_names, body.nome_a, body.nome_b)
 
 
-@app.post("/broadcast/{quadra_id}/volume/{direcao}", dependencies=[Depends(require_live_key)])
+@app.post("/broadcast/{quadra_id}/volume/{direcao}", dependencies=[Depends(require_live_access)])
 def broadcast_volume_step(quadra_id: str, direcao: str, passo: int | None = None):
     """direcao = 'up' ou 'down'; passo em % (padrão BROADCAST_VOLUME_STEP)."""
     if direcao not in ("up", "down"):
@@ -261,9 +283,103 @@ def broadcast_volume_step(quadra_id: str, direcao: str, passo: int | None = None
     return _bc(quadra_id, broadcast.change_volume, 1 if direcao == "up" else -1, passo)
 
 
-@app.put("/broadcast/{quadra_id}/volume", dependencies=[Depends(require_live_key)])
+@app.put("/broadcast/{quadra_id}/volume", dependencies=[Depends(require_live_access)])
 def broadcast_volume(quadra_id: str, body: BroadcastVolume):
     return _bc(quadra_id, broadcast.set_volume, body.nivel)
+
+
+# --- Estado geral (usado pelo painel) -----------------------------------------
+
+@app.get("/status", dependencies=[Depends(require_live_access)])
+def live_overview():
+    """Uma linha por quadra com os dois modos (live direta e transmissão com placar).
+
+    Não consulta câmera nenhuma na hora: a live direta vem do cache da verificação periódica.
+    `modo`: placar | direta | conflito (os dois ligados) | nenhum | desconhecido (câmera
+    não respondeu e não há transmissão com placar).
+    """
+    quadras = []
+    for quadra_id, camera in config.load_cameras().items():
+        direta = monitor.get(quadra_id)
+        placar = broadcast.snapshot(quadra_id)
+        if placar["no_ar"] and direta["no_ar"]:
+            modo = "conflito"
+        elif placar["no_ar"]:
+            modo = "placar"
+        elif direta["no_ar"]:
+            modo = "direta"
+        elif direta["no_ar"] is None and str(camera.get("input_url", "")).startswith("rtsp://"):
+            modo = "desconhecido"
+        else:
+            modo = "nenhum"
+        quadras.append({
+            "quadra_id": quadra_id,
+            "nome": camera.get("nome", quadra_id),
+            "esporte": camera.get("esporte"),
+            "tem_stream_key": bool(camera.get("youtube_stream_key")),
+            "modo": modo,
+            "direta": direta,
+            "placar": placar,
+        })
+    on_air = sum(1 for q in quadras if q["placar"]["no_ar"])
+    return {
+        "quadras": quadras,
+        "transmissoes_com_placar": {"no_ar": on_air, "limite": config.BROADCAST_MAX_CONCURRENT},
+        "verificacao_na_subida": monitor.last_startup_summary,
+    }
+
+
+# --- Painel web ---------------------------------------------------------------
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/painel/static", StaticFiles(directory=str(_STATIC_DIR)), name="painel_static")
+_PANEL_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+}
+
+
+class PanelLogin(BaseModel):
+    usuario: str
+    senha: str
+
+
+@app.get("/painel", include_in_schema=False)
+def painel_page():
+    return FileResponse(_STATIC_DIR / "painel.html", headers=_PANEL_HEADERS)
+
+
+@app.post("/painel/login", include_in_schema=False)
+def painel_login(body: PanelLogin, request: Request, response: Response):
+    ip = request.client.host if request.client else "?"
+    if not panel.configured():
+        raise HTTPException(status_code=503, detail="Defina ADMIN_USERNAME e ADMIN_PASSWORD no servidor.")
+    if panel.login_blocked(ip):
+        raise HTTPException(status_code=429, detail="Muitas tentativas; aguarde um minuto.")
+    if not panel.check_credentials(body.usuario, body.senha):
+        panel.register_failure(ip)
+        raise HTTPException(status_code=401, detail="Usuário ou senha inválidos.")
+    panel.clear_failures(ip)
+    response.set_cookie(
+        panel.COOKIE, panel.make_token(body.usuario), max_age=int(config.PANEL_SESSION_HOURS * 3600),
+        httponly=True, samesite="strict", path="/",
+    )
+    return {"usuario": body.usuario}
+
+
+@app.post("/painel/logout", include_in_schema=False)
+def painel_logout(response: Response):
+    response.delete_cookie(panel.COOKIE, path="/")
+    return {"status": "saiu"}
+
+
+@app.get("/painel/me", include_in_schema=False)
+def painel_me(request: Request):
+    user = panel.verify_token(request.cookies.get(panel.COOKIE))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sem sessão.")
+    return {"usuario": user}
 
 
 def _serialize_replay(replay: Replay) -> dict:

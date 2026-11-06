@@ -161,6 +161,27 @@ def stop(quadra_id: str, input_url: str) -> bool:
         return enabled
 
 
+def adopt(quadra_id: str, input_url: str) -> bool:
+    """Dá prazo (LIVE_MAX_SECONDS) a uma live direta que está no ar sem registro, por exemplo
+    ligada na interface web da câmera ou com o arquivo de prazos perdido. Sem isso ela
+    nunca expiraria. False se já tinha prazo ou se não há limite configurado."""
+    with _lock:
+        if config.LIVE_MAX_SECONDS <= 0 or quadra_id in _load_deadlines():
+            return False
+        deadline = time.time() + config.LIVE_MAX_SECONDS
+        _save_deadlines({**_load_deadlines(), quadra_id: deadline})
+        _arm(quadra_id, input_url, deadline)
+        return True
+
+
+def drop_stale(quadra_id: str) -> bool:
+    """Esquece o prazo de uma live que, na verdade, não está mais no ar. True se havia."""
+    with _lock:
+        had = quadra_id in _load_deadlines()
+        _forget(quadra_id)
+        return had
+
+
 def resume(cameras: dict[str, dict]) -> None:
     """Na subida da API: reassume os prazos gravados (os vencidos desligam já)."""
     with _lock:

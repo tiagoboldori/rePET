@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>rePET · Painel de transmissão</title>
+  <link rel="stylesheet" href="/painel/static/painel.css">
+</head>
+<body>
+  <main id="login" class="login" hidden>
+    <form id="login-form" class="card login-card" autocomplete="on">
+      <h1>rePET</h1>
+      <p class="muted">Painel de transmissão</p>
+      <label>Usuário <input id="usuario" name="username" autocomplete="username" required></label>
+      <label>Senha <input id="senha" name="password" type="password" autocomplete="current-password" required></label>
+      <p id="login-erro" class="erro" role="alert" hidden></p>
+      <button class="primary" type="submit">Entrar</button>
+    </form>
+  </main>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <div>
+        <h1>Painel de transmissão</h1>
+        <p id="resumo" class="muted">…</p>
+      </div>
+      <div class="topbar-right">
+        <span id="usuario-logado" class="muted"></span>
+        <button id="sair" class="secondary small" type="button">Sair</button>
+      </div>
+    </header>
+    <p id="aviso-geral" class="faixa" role="status" hidden></p>
+    <main id="quadras" class="grid"></main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/painel/static/painel.js"></script>
+</body>
+</html>

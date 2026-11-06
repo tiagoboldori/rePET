@@ -5,6 +5,7 @@ ao receber 'q' — o mesmo contrato que a API usa com o ffmpeg de verdade.
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
@@ -20,9 +21,21 @@ CAMERA2 = {"quadra_id": "q2", "input_url": "rtsp://u:p@10.0.0.2/s", "youtube_str
 CAMERA3 = {"quadra_id": "q3", "input_url": "rtsp://u:p@10.0.0.3/s", "youtube_stream_key": "k-3"}
 
 FAKE = """#!{python}
-import sys
+import os, sys, threading, time
 log = open({log!r}, "a", buffering=1)
 log.write("start\\n")
+progress = sys.argv[sys.argv.index("-progress") + 1]
+
+def tick():
+    n = 0
+    while True:
+        if not os.path.exists({freeze!r}):  # arquivo-sinal = "congelado": vivo, mas sem quadros
+            n += 1
+            with open(progress, "w") as fh:
+                fh.write(f"frame={{n}}\\nprogress=continue\\n")
+        time.sleep(0.2)
+
+threading.Thread(target=tick, daemon=True).start()
 for line in sys.stdin:
     log.write(line)
     if line.strip() == "q":
@@ -38,18 +51,22 @@ def bc(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "LIVE_MAX_SECONDS", 0)
     monkeypatch.setattr(broadcast, "RESTART_BACKOFF_MIN", 0.2)
     monkeypatch.setattr(broadcast, "STOP_GRACE_SECONDS", 3.0)
+    monkeypatch.setattr(broadcast, "STARTUP_GRACE_SECONDS", 1000.0)  # os testes de travamento baixam isto
     monkeypatch.setattr(broadcast, "_state", {})
     monkeypatch.setattr(broadcast, "_runtime", {})
     monkeypatch.setattr(broadcast, "_loaded", False)
-    fakes = tmp_path / "fakes"
-    fakes.mkdir()
 
     def fake_cmd(quadra_id, input_url, stream_key, volume, has_audio=True):
-        log = tmp_path / f"{quadra_id}.stdin.log"
+        fakes = tmp_path / "fakes" / quadra_id
+        fakes.mkdir(parents=True, exist_ok=True)
         script = fakes / "ffmpeg"
-        script.write_text(FAKE.format(python=sys.executable, log=str(log)))
+        script.write_text(FAKE.format(
+            python=sys.executable, log=str(tmp_path / f"{quadra_id}.stdin.log"),
+            freeze=str(tmp_path / f"{quadra_id}.freeze"),
+        ))
         script.chmod(0o755)
-        return [str(script), str(broadcast._dir(quadra_id)), f"vol={volume}"]
+        return [str(script), str(broadcast._dir(quadra_id)), f"vol={volume}",
+                "-progress", str(broadcast._progress(quadra_id))]
 
     monkeypatch.setattr(broadcast, "_ffmpeg_cmd", fake_cmd)
     monkeypatch.setattr(broadcast, "_probe_audio", lambda url: True)  # sem rede nos testes
@@ -284,3 +301,140 @@ def test_probe_audio(monkeypatch):
     assert broadcast._probe_audio("rtsp://x") is True  # câmera não respondeu: na dúvida, assume que tem
     monkeypatch.setattr(broadcast.subprocess, "run", fake(exc=broadcast.subprocess.TimeoutExpired("ffprobe", 20)))
     assert broadcast._probe_audio("rtsp://x") is True
+
+
+# --- edge cases da stream ----------------------------------------------------
+
+def _fast_stall(monkeypatch):
+    monkeypatch.setattr(broadcast, "STARTUP_GRACE_SECONDS", 1.0)
+    monkeypatch.setattr(broadcast, "STALL_SECONDS", 1.5)
+
+
+def test_ffmpeg_saudavel_nao_e_morto_e_aparece_como_transmitindo(bc, monkeypatch):
+    _fast_stall(monkeypatch)
+    broadcast.start("q1", CAMERA)
+    pid = broadcast._state["q1"]["pid"]
+    assert _wait(lambda: broadcast.snapshot("q1")["transmitindo"], 5)
+    time.sleep(3.5)  # bem além do prazo de travamento: quadros avançando, nada a matar
+    snap = broadcast.snapshot("q1")
+    assert snap["transmitindo"] and snap["travamentos"] == 0 and broadcast._state["q1"]["pid"] == pid
+
+
+def test_ffmpeg_vivo_mas_sem_quadros_e_morto_e_relancado(bc, monkeypatch):
+    _fast_stall(monkeypatch)
+    broadcast.start("q1", CAMERA)
+    pid = broadcast._state["q1"]["pid"]
+    assert _wait(lambda: broadcast.snapshot("q1")["transmitindo"], 5)
+    (bc / "q1.freeze").touch()  # congela: continua vivo, mas não produz quadro
+    assert _wait(lambda: broadcast._state["q1"]["pid"] not in (None, pid), 10)
+    snap = broadcast.snapshot("q1")
+    assert snap["travamentos"] == 1 and snap["no_ar"]
+    (bc / "q1.freeze").unlink()
+    assert _wait(lambda: broadcast.snapshot("q1")["transmitindo"], 5)  # voltou a transmitir
+
+
+def test_ffmpeg_parado_por_sigstop_tambem_e_detectado(bc, monkeypatch):
+    _fast_stall(monkeypatch)
+    broadcast.start("q1", CAMERA)
+    pid = broadcast._state["q1"]["pid"]
+    assert _wait(lambda: broadcast.snapshot("q1")["transmitindo"], 5)
+    os.kill(pid, signal.SIGSTOP)  # nem o 'q' ele atende parado; só o SIGKILL resolve
+    assert _wait(lambda: broadcast._state["q1"]["pid"] not in (None, pid), 10)
+    assert broadcast.snapshot("q1")["travamentos"] == 1
+
+
+def test_ffmpeg_que_morre_na_largada_aparece_como_tentando_e_nao_transmitindo(bc, monkeypatch):
+    monkeypatch.setattr(broadcast, "_ffmpeg_cmd", lambda *a, **k: [sys.executable, "-c", "import sys; sys.exit(1)"])
+    broadcast.start("q1", CAMERA)  # ex.: YouTube/câmera fora: o ffmpeg sai na hora, de novo e de novo
+    assert _wait(lambda: broadcast.snapshot("q1")["reinicios"] >= 2, 8)
+    snap = broadcast.snapshot("q1")
+    assert snap["no_ar"] is True and snap["transmitindo"] is False
+
+
+def test_sondagem_de_audio_nao_prende_o_lock_das_outras_quadras(bc, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(broadcast, "_probe_audio", lambda url: time.sleep(2) or True)  # câmera lenta
+    t = threading.Thread(target=broadcast.start, args=("q1", CAMERA))
+    t.start()
+    time.sleep(0.3)
+    begin = time.time()
+    broadcast.add_point("q2", "a")  # outra quadra, enquanto q1 ainda sonda
+    assert time.time() - begin < 0.5
+    t.join()
+    assert broadcast.snapshot("q1")["no_ar"]
+
+
+def test_estado_corrompido_nao_derruba_a_subida(bc):
+    config.BROADCAST_STATE_FILE.write_text("{isto nao e json")
+    broadcast.resume({"q1": CAMERA})  # não pode levantar exceção
+    assert broadcast.snapshot("q1")["no_ar"] is False
+    assert config.BROADCAST_STATE_FILE.with_suffix(".corrupt").exists()
+
+
+def test_estado_com_campos_estragados_e_saneado(bc):
+    config.BROADCAST_STATE_FILE.write_text(json.dumps({
+        "q1": {"no_ar": "talvez", "nomes": "x", "placar": {"a": [1], "b": {"pontos": -4, "sets": "dois"}},
+               "volume": "alto", "pid": -3, "prazo": "amanha"},
+        "q2": ["lista"], "../x": {"no_ar": True},
+    }))
+    snap = broadcast.snapshot("q1")
+    assert snap["no_ar"] is False and snap["nomes"] == {"a": "DUPLA A", "b": "DUPLA B"}
+    assert snap["placar"] == {"a": {"pontos": 0, "sets": 0}, "b": {"pontos": 0, "sets": 0}}
+    assert snap["volume"] == 100
+    assert "q2" not in broadcast._state and "../x" not in broadcast._state
+
+
+def test_ffmpeg_sem_registro_e_readotado_com_o_placar_do_overlay(bc, monkeypatch):
+    broadcast.start("q1", CAMERA, {"a": "Ana", "b": "Bia"})
+    broadcast.add_point("q1", "a", 4)
+    broadcast.add_set("q1", "b")
+    broadcast.add_point("q1", "b", 2)
+    pid = broadcast._state["q1"]["pid"]
+    assert _wait(lambda: broadcast.snapshot("q1")["transmitindo"], 5)
+    broadcast.detach()
+    config.BROADCAST_STATE_FILE.unlink()  # perdeu o arquivo de estado; o ffmpeg segue publicando
+    monkeypatch.setattr(broadcast, "_state", {})
+    monkeypatch.setattr(broadcast, "_loaded", False)
+    summary = broadcast.resume({"q1": CAMERA})
+    assert summary["orfas_adotadas"] == ["q1"]
+    snap = broadcast.snapshot("q1")
+    assert snap["no_ar"] and broadcast._state["q1"]["pid"] == pid
+    assert snap["nomes"] == {"a": "ANA", "b": "BIA"}
+    assert snap["placar"] == {"a": {"pontos": 0, "sets": 0}, "b": {"pontos": 2, "sets": 1}}
+
+
+def test_quadra_removida_do_cameras_json_tem_o_ffmpeg_encerrado(bc, monkeypatch):
+    broadcast.start("q1", CAMERA)
+    pid = broadcast._state["q1"]["pid"]
+    broadcast.detach()
+    monkeypatch.setattr(broadcast, "_state", {})
+    monkeypatch.setattr(broadcast, "_loaded", False)
+    summary = broadcast.resume({})  # cameras.json sem a quadra
+    assert "q1" in summary["encerradas"]
+    assert _wait(lambda: not broadcast._pid_is_ours(pid, "q1"), 5)
+    assert not broadcast.snapshot("q1")["no_ar"]
+
+
+def test_prazo_vencido_enquanto_a_api_estava_fora_encerra_na_subida(bc, monkeypatch):
+    monkeypatch.setattr(config, "LIVE_MAX_SECONDS", 3600)
+    broadcast.start("q1", CAMERA)
+    pid = broadcast._state["q1"]["pid"]
+    broadcast.detach()
+    saved = json.loads(config.BROADCAST_STATE_FILE.read_text())
+    saved["q1"]["prazo"] = time.time() - 5  # venceu durante a queda
+    config.BROADCAST_STATE_FILE.write_text(json.dumps(saved))
+    monkeypatch.setattr(broadcast, "_state", {})
+    monkeypatch.setattr(broadcast, "_loaded", False)
+    broadcast.resume({"q1": CAMERA})
+    assert _wait(lambda: not broadcast.snapshot("q1")["no_ar"], 8)
+    assert _wait(lambda: not broadcast._pid_is_ours(pid, "q1"), 5)
+
+
+def test_log_grande_e_rotacionado_na_largada(bc, monkeypatch):
+    monkeypatch.setattr(broadcast, "LOG_MAX_BYTES", 100)
+    config.BROADCAST_LOG_DIR.mkdir(parents=True)
+    log = config.BROADCAST_LOG_DIR / "broadcast_q1.log"
+    log.write_text("x" * 500)
+    broadcast.start("q1", CAMERA)
+    assert log.with_suffix(".log.1").read_text() == "x" * 500
