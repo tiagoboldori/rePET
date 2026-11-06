@@ -113,7 +113,8 @@ em `test/`, **R** = teste real com câmera e ffmpeg de verdade).
 | Câmera ou YouTube fora **na largada** | `start` responde `iniciada`; fica `no_ar: true` com `transmitindo: false` e `reinicios` subindo. O painel mostra "Conectando…" | T |
 | Câmera **sem áudio** | Sobe com trilha de silêncio (`audio_da_camera: false`), em vez de o ffmpeg sair em loop com "matches no streams" | T, R (substream 102) |
 | **API reinicia** no meio da live | O ffmpeg segue; `resume()` o readota pelo pid; placar e volume continuam; o FIFO segue funcionando | T, R |
-| `systemctl restart repet` (e o reinício por volta das 06:00) | **Derruba** as transmissões com placar (`KillMode=control-group`); a live direta sobrevive | documentado |
+| **Reboot diário do servidor às 06:00** (agendado) e `systemctl restart repet` | **Derrubam** os ffmpeg das transmissões com placar (`KillMode=control-group`). Na subida a API **relança sozinha** a que estava no ar, com placar, nomes e volume gravados e o prazo original; a live direta é da câmera e não depende do servidor | T (ffmpeg morto antes do `resume`); reboot real **não** testado |
+| **Mesma stream key em várias quadras** (intencional) | Só uma pode estar no ar por vez, em qualquer modo: ligar outra responde `409` (a câmera da outra quadra é consultada na hora); `/status` traz `chave_compartilhada_com` e `chave_em_uso_por`, e o painel desabilita o botão. Se duas já estiverem no ar (ligadas fora da API), a subida avisa no log | T, R (3 quadras com a mesma key, uma de cada vez) |
 | Arquivo de estado **corrompido** ou com campos estragados | Não derruba a API: é posto de lado (`.corrupt`) ou os campos são saneados | T |
 | ffmpeg **sem registro** no estado (arquivo perdido) | Readotado, com nomes e placar lidos do overlay | T |
 | Quadra **removida** do `cameras.json` com transmissão no ar | O ffmpeg é encerrado na subida | T |
@@ -145,7 +146,6 @@ funcionando.
   agendada no YouTube Studio: do lado do servidor isso parece uma conexão normal. Só se
   vê no YouTube Studio (e indiretamente por `reinicios` subindo). Confirmar o lado do
   YouTube exigiria a API do YouTube com OAuth.
-- **Mesma stream key em duas quadras:** não é validado.
 - **Disco cheio** ou relógio do servidor alterado: não tratados.
 - **Anúncios e timer de jogo:** não implementados.
 - O painel trafega em **HTTP puro**; para acesso fora da rede interna, ponha um proxy
@@ -185,7 +185,10 @@ grep '\[startup\]\|\[broadcast\]\|\[monitor\]' logs/api.log
 ```
 
 **Reiniciar só a API** (não derruba nenhuma transmissão): `kill $(cat run/api.pid)`; o
-watchdog a sobe em até 30 s e o botão de replay fica sem resposta nesse intervalo.
-**`systemctl restart repet` derruba as transmissões com placar.** Não matar o ffmpeg
+watchdog a sobe em até 30 s e o botão de replay fica sem resposta nesse intervalo. Variáveis
+**novas** do `.env` (que o watchdog ainda não tinha) passam a valer nessa subida, porque o
+`ensure_services.sh` as carrega; **mudar o valor de uma variável que já existia** exige
+reiniciar o serviço ou esperar o reboot das 06:00.
+**`systemctl restart repet` e o reboot derrubam as transmissões com placar.** Não matar o ffmpeg
 com `pkill -f` por padrão de nome (pode pegar o próprio comando): use o pid em
 `.data/broadcast_state.json`.

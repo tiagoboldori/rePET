@@ -182,16 +182,26 @@ Para placar, use `/broadcast`: um ffmpeg por quadra lê o RTSP, reduz tudo a 108
 (a quadra2 entrega 1440p), desenha nomes/sets/pontos por cima e empurra o RTMP ao
 YouTube. Custo medido: ~1 a 1,5 núcleo e ~0,4 a 0,7 GB por transmissão (limite de
 2 simultâneas). O ffmpeg roda destacado: reiniciar só a API não o derruba (o
-`resume()` o readota) e, se ele cair, a API o relança. **Atenção:** `systemctl
-restart repet` (`KillMode=control-group`; o serviço costuma reiniciar por volta das 06:00) mata o cgroup inteiro e
-derruba a transmissão; já a live direta, que é da câmera, sobrevive.
+`resume()` o readota) e, se ele cair, a API o relança. Se ficar vivo mas parar de
+produzir quadros (rede do YouTube, RTSP congelado), um watchdog o mata e relança
+(`travamentos` na resposta). Na subida a API reconcilia o que já estava no ar (readota
+ffmpeg, dá prazo a live direta ligada fora da API, aponta conflito entre os dois modos).
 
-Se o ffmpeg ficar vivo mas parar de produzir quadros (rede do YouTube, RTSP congelado),
-um watchdog o mata e relança (`travamentos` na resposta). Na subida a API reconcilia o
-que já estava no ar (readota ffmpeg, dá prazo a live direta ligada fora da API, aponta
-conflito entre os dois modos).
+**Reboot diário às 06:00.** O servidor é reiniciado todo dia às 06:00 (reboot agendado,
+para liberar memória e manter a manutenção em dia). Esse reboot, assim como
+`systemctl restart repet` (`KillMode=control-group`), derruba os ffmpeg das transmissões
+com placar. Na subida a API **relança sozinha** a que estava no ar (placar, nomes e
+volume ficam gravados, e vale o prazo `LIVE_MAX_SECONDS` original), com um corte de alguns
+segundos; isso foi testado matando o ffmpeg antes da reconciliação, não com um reboot
+real. A live direta, que é da câmera, não depende do servidor. Reiniciar só a API não
+derruba nenhuma das duas.
 
-**Painel web:** `http://SERVIDOR:8000/painel` (celular ou computador) liga/encerra as
+**Stream key compartilhada.** Usar a mesma `youtube_stream_key` em várias quadras é
+permitido (um canal só), mas **só uma pode estar no ar por vez, em qualquer modo**: ligar
+uma enquanto outra com a mesma key está no ar responde `409`, e o painel avisa e desabilita
+o botão.
+
+**Painel web:** `http://SERVIDOR:8000/painel` (a mesma porta 8000 da API; celular ou computador) liga/encerra as
 duas modalidades e controla placar, sets, nomes e volume. Exige `ADMIN_USERNAME` e
 `ADMIN_PASSWORD` no `.env`; trafega em HTTP puro (na rede interna). Os dois modos, os
 casos de borda tratados e o que ainda não é coberto estão em
@@ -232,6 +242,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `LIVE_MAX_SECONDS` | `7200` | Desliga a live na câmera depois desse tempo; `0` = sem limite |
 | `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
 | `BROADCAST_MAX_CONCURRENT` / `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `2` / `ultrafast` / `4500k` / `4` | Transmissão com placar: simultâneas, preset x264, bitrate e núcleos por transmissão |
+| `BROADCAST_DIR` / `BROADCAST_STATE_FILE` / `BROADCAST_LOG_DIR` | `.data/broadcast` / `.data/broadcast_state.json` / `logs/` | Overlay e FIFO por quadra, estado das transmissões (placar, volume, pid, prazo) e logs do ffmpeg |
+| `BROADCAST_FONT` | `DejaVuSans-Bold.ttf` do sistema | Fonte do placar |
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do `volume/up\|down` e teto, em % |
 | `LIVE_MONITOR_INTERVAL_SECONDS` | `15` | Intervalo da verificação (em segundo plano) das lives diretas nas câmeras |
 | `PANEL_SESSION_HOURS` / `PANEL_SECRET` | `12` / vazio | Validade da sessão do painel; segredo extra que assina o cookie |

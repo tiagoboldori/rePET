@@ -26,7 +26,8 @@ A documentação interativa (Swagger) é gerada pelo FastAPI em
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` | `X-Live-Key` | Sobe/desce o volume com a live no ar |
 | `GET /broadcast`, `GET /broadcast/{quadra_id}` | `X-Live-Key` | Estado (placar, nomes, volume, tempo no ar) |
 | `GET /status` | `X-Live-Key` ou sessão do painel | Uma linha por quadra com os dois modos (direta e placar) |
-| `GET /painel` | página pública; login dentro | Painel web de controle da transmissão |
+| `GET /painel` | página pública; login dentro | Painel web de controle da transmissão (porta 8000, a mesma da API) |
+| `POST /painel/login`, `POST /painel/logout`, `GET /painel/me` | credencial `ADMIN_*` / cookie | Sessão do painel |
 | `GET /api/replays/{replay_id}` | nenhuma | Metadados de um replay |
 | `GET /api/replays/{replay_id}/media` | nenhuma | Baixa/assiste o vídeo do replay |
 | `GET /api/quadras/{quadra_id}/replays` | nenhuma | Lista paginada de replays da quadra |
@@ -179,6 +180,25 @@ Use a live direta (`/live`) quando não precisar de placar; ela não gasta CPU.
 
 Lados são sempre `a` e `b`. O placar é simples: pontos e sets, números inteiros.
 
+### Todas as rotas `/broadcast`
+
+Todas exigem `X-Live-Key` (ou sessão do painel) e `quadra_id` existente em `cameras.json`.
+Todas devolvem o objeto de estado descrito mais abaixo (o `start`/`stop` somam `status`).
+
+| Método e rota | Corpo / parâmetros | O que faz |
+|---|---|---|
+| `GET /broadcast` | | Todas as quadras, quem está no ar e o limite |
+| `GET /broadcast/{quadra_id}` | | Estado de uma quadra |
+| `POST /broadcast/{quadra_id}/start` | opcional: `nome_a`, `nome_b`, `reset` (padrão `true`), `volume` | Liga (idempotente) |
+| `POST /broadcast/{quadra_id}/stop` · `DELETE /broadcast/{quadra_id}` | | Encerra |
+| `POST /broadcast/{quadra_id}/ponto/{lado}` | `?delta=1` (`-1` corrige) | Ponto em `a` ou `b` |
+| `POST /broadcast/{quadra_id}/set/{lado}` | `?delta=1` (`-1` só tira o set) | +1 set e zera os pontos dos dois lados |
+| `PUT /broadcast/{quadra_id}/placar` | `pontos_a`, `pontos_b`, `sets_a`, `sets_b` (os que vierem) | Correção manual |
+| `POST /broadcast/{quadra_id}/placar/zerar` | | Zera pontos e sets |
+| `PUT /broadcast/{quadra_id}/nomes` | `nome_a`, `nome_b` | Troca os nomes (até 14 caracteres, maiúsculas) |
+| `POST /broadcast/{quadra_id}/volume/{up\|down}` | `?passo=10` (%) | Sobe/desce o volume |
+| `PUT /broadcast/{quadra_id}/volume` | `{"nivel": 150}` (%) | Define o volume |
+
 ### Ligar e desligar
 
 ```bash
@@ -243,7 +263,7 @@ microfone da câmera já chega perto de 0 dBFS em jogo.
 |---|---|
 | `401` / `503` | Chave ausente/errada / `LIVE_API_KEY` não configurada |
 | `404` | `quadra_id` não está em `config/cameras.json` |
-| `409` | Limite de 2 transmissões, ou a quadra está em live direta (e vice-versa) |
+| `409` | Limite de 2 transmissões; a quadra está em live direta (e vice-versa); ou outra quadra com a **mesma stream key** já está no ar (`/live` também) |
 | `422` | Lado diferente de `a`/`b`, ou a quadra sem `youtube_stream_key` |
 | `502` | A câmera não respondeu ao checar a live direta |
 | `503` | O ffmpeg não estava lendo comandos (reiniciando); tente de novo |
@@ -280,6 +300,7 @@ curl http://SERVIDOR:8000/status -H "X-Live-Key: SUA_LIVE_API_KEY"
   "quadras": [{
     "quadra_id": "loc1-quadra1", "nome": "Quadra 2", "esporte": "padel",
     "tem_stream_key": true,
+    "chave_compartilhada_com": [], "chave_em_uso_por": null,
     "modo": "placar",
     "direta": {"no_ar": false, "erro": null, "verificado_ha_segundos": 7},
     "placar": { "...": "o mesmo objeto de GET /broadcast/{quadra_id}" }
@@ -291,6 +312,10 @@ curl http://SERVIDOR:8000/status -H "X-Live-Key: SUA_LIVE_API_KEY"
 
 `modo`: `placar`, `direta`, `conflito` (os dois ligados: veja abaixo), `nenhum` ou
 `desconhecido` (a câmera não respondeu e não há transmissão com placar).
+
+`chave_compartilhada_com` lista as outras quadras com a **mesma** `youtube_stream_key`
+(duplicar a key é permitido: um canal só) e `chave_em_uso_por` diz qual delas está no ar
+agora. Enquanto uma estiver no ar, em **qualquer** modo, ligar outra responde `409`.
 
 ### Verificação na subida
 
