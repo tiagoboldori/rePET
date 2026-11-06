@@ -4,37 +4,61 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#7b1e2b">
   <title>rePET · Painel de transmissão</title>
-  <link rel="stylesheet" href="/painel/static/painel.css">
+  <link rel="stylesheet" href="/painel/static/painel.css?v=5">
 </head>
 <body>
   <main id="login" class="login" hidden>
-    <form id="login-form" class="card login-card" autocomplete="on">
-      <h1>rePET</h1>
-      <p class="muted">Painel de transmissão</p>
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="brand brand-grande">
+        <span class="logo" aria-hidden="true"></span>
+        <div>
+          <h1>rePET</h1>
+          <p class="muted">Painel de transmissão</p>
+        </div>
+      </div>
       <label>Usuário <input id="usuario" name="username" autocomplete="username" required></label>
       <label>Senha <input id="senha" name="password" type="password" autocomplete="current-password" required></label>
       <p id="login-erro" class="erro" role="alert" hidden></p>
-      <button class="primary" type="submit">Entrar</button>
+      <button class="primary grande" type="submit">Entrar</button>
     </form>
   </main>
 
   <div id="app" hidden>
     <header class="topbar">
-      <div>
-        <h1>Painel de transmissão</h1>
-        <p id="resumo" class="muted">…</p>
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <div>
+          <h1>rePET</h1>
+          <p class="muted">Painel de transmissão</p>
+        </div>
       </div>
+      <div class="pills" id="pills" aria-live="polite"></div>
       <div class="topbar-right">
-        <span id="usuario-logado" class="muted"></span>
+        <span id="conexao" class="conexao" role="status"><span class="dot" aria-hidden="true"></span><span id="conexao-txt">conectando…</span></span>
+        <button id="tema" class="icon-btn" type="button" aria-label="Alternar tema claro/escuro" title="Alternar tema"></button>
+        <span id="usuario-logado" class="muted usuario"></span>
         <button id="sair" class="secondary small" type="button">Sair</button>
       </div>
     </header>
-    <p id="aviso-geral" class="faixa" role="status" hidden></p>
-    <main id="quadras" class="grid"></main>
+    <p id="aviso-geral" class="faixa" role="alert" hidden></p>
+    <main id="quadras" class="grid" aria-label="Quadras"></main>
+    <p id="vazio" class="vazio muted" hidden>Nenhuma quadra cadastrada em <code>config/cameras.json</code>.</p>
   </div>
 
+  <dialog id="dlg" class="dlg" aria-labelledby="dlg-titulo">
+    <form method="dialog">
+      <h2 id="dlg-titulo"></h2>
+      <p id="dlg-texto" class="muted"></p>
+      <div class="dlg-acoes">
+        <button class="secondary" value="cancel" type="submit">Cancelar</button>
+        <button id="dlg-ok" class="primary" value="ok" type="submit">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/painel/static/painel.js"></script>
+  <script src="/painel/static/painel.js?v=5"></script>
 </body>
 </html>

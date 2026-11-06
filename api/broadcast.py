@@ -217,9 +217,44 @@ def _video_filters(quadra_id: str) -> list[str]:
     return video
 
 
-def _filter_graph(quadra_id: str, volume: int, audio_input: str = "0:a") -> str:
+# Redução de ruído do áudio da câmera (mono 16 kHz), medida em áudio real das quadras: o corte do grave tira o
+# zumbido contínuo e o afftdn (com rastreio do ruído) rebaixa o ruído de fundo sem mexer em batidas e vozes altas.
+# Custo medido: ~+1% de um núcleo por transmissão. Roda ANTES do volume (atua sempre no nível original da câmera)
+# e ANTES do aresample para 44,1 kHz estéreo (processa 5,5x menos amostras).
+DENOISE_LEVELS = {
+    "leve": "highpass=f=100,afftdn=nr=10:nf=-50:tn=1",
+    "medio": "highpass=f=100,afftdn=nr=14:nf=-45:tn=1",
+    "forte": "highpass=f=100,afftdn=nr=25:nf=-35:tn=1",
+}
+_denoise_filter_ok: bool | None = None
+
+
+def _denoise_available() -> bool:
+    """O ffmpeg desta máquina tem o filtro afftdn? (checa uma vez). Sem ele a live seguiria falhando ao subir, então
+    é melhor transmitir sem o filtro e avisar. Na dúvida (não conseguiu perguntar), não aplica."""
+    global _denoise_filter_ok
+    if _denoise_filter_ok is None:
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, timeout=15)
+            _denoise_filter_ok = out.returncode == 0 and " afftdn " in out.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            _denoise_filter_ok = False
+        if not _denoise_filter_ok:
+            print("[broadcast] aviso: este ffmpeg não tem o filtro afftdn (ou não respondeu); "
+                  "a redução de ruído do áudio fica desligada.")
+    return _denoise_filter_ok
+
+
+def _denoise_chain() -> str | None:
+    """Cadeia de filtros do nível configurado em AUDIO_DENOISE, ou None se desligada/indisponível."""
+    chain = DENOISE_LEVELS.get(config.AUDIO_DENOISE)
+    return chain if chain and _denoise_available() else None
+
+
+def _filter_graph(quadra_id: str, volume: int, audio_input: str = "0:a", denoise: str | None = None) -> str:
+    pre = f"{denoise}," if denoise else ""
     audio = (
-        f"volume@vol={volume / 100:.3f}:eval=frame,alimiter=limit=0.95,"
+        f"{pre}volume@vol={volume / 100:.3f}:eval=frame,alimiter=limit=0.95,"
         "aresample=44100,aformat=channel_layouts=stereo"
     )
     return f"[0:v]{','.join(_video_filters(quadra_id))}[v];[{audio_input}]{audio}[a]"
@@ -256,7 +291,9 @@ def _ffmpeg_cmd(
         "ffmpeg", "-loglevel", "warning", *progress,
         "-rtsp_transport", "tcp", "-timeout", "15000000",
         "-i", input_url, *silence,
-        "-filter_complex", _filter_graph(quadra_id, volume, "0:a" if has_audio else "1:a"),
+        "-filter_complex", _filter_graph(
+            quadra_id, volume, "0:a" if has_audio else "1:a", _denoise_chain() if has_audio else None
+        ),
         "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", config.BROADCAST_PRESET,
         "-threads", str(config.BROADCAST_THREADS),
@@ -297,6 +334,8 @@ def _spawn(quadra_id: str, camera: dict, runtime: _Runtime, has_audio: bool) -> 
     runtime.has_audio = has_audio
     if not has_audio:
         print(f"[broadcast] {quadra_id}: a câmera não tem áudio; a transmissão vai com silêncio.")
+    elif _denoise_chain():
+        print(f"[broadcast] {quadra_id}: redução de ruído do áudio: {config.AUDIO_DENOISE}.")
     cmd = _ffmpeg_cmd(
         quadra_id, camera["input_url"], camera["youtube_stream_key"], st["volume"], has_audio,
         # Só repassa quando a quadra tem URL própria: sem ela a chamada é idêntica à de antes.

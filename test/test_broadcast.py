@@ -6,6 +6,7 @@ ao receber 'q' — o mesmo contrato que a API usa com o ffmpeg de verdade.
 from __future__ import annotations
 
 import json
+import re
 import os
 import signal
 import sys
@@ -279,7 +280,8 @@ def test_camera_sem_audio_gera_trilha_de_silencio_em_vez_de_falhar():
     assert ";[1:a]volume@vol" in graph and "[0:a]" not in graph
     with_audio = broadcast._ffmpeg_cmd("q1", "rtsp://x", "KEY", 100)
     assert not any(a.startswith("anullsrc") for a in with_audio) and "-shortest" not in with_audio
-    assert ";[0:a]volume@vol" in with_audio[with_audio.index("-filter_complex") + 1]
+    # o áudio da câmera alimenta o volume (pode haver a redução de ruído no meio; a ordem exata está em test_audio_denoise.py)
+    assert re.search(r";\[0:a\][^;\[]*volume@vol", with_audio[with_audio.index("-filter_complex") + 1])
 
 
 def test_probe_audio(monkeypatch):

@@ -230,3 +230,13 @@ def test_cookie_adulterado_e_401():
 def test_bearer_ruim_vence_cookie_valido():
     cookie = f"{panel.COOKIE}={panel.make_token('operador')}"
     assert status_of(req(authorization="Bearer errado", cookie=cookie)) == 401
+
+
+def test_rotulo_do_operador_do_painel_e_do_x_live_key_ficam_no_request():
+    cookie = f"{panel.COOKIE}={panel.make_token('operador')}"
+    r = req("POST", cookie=cookie, x_painel="1")
+    auth.check_access(r)
+    assert r.state.token_owner == "painel:operador"
+    r = req(x_live_key=LIVE)
+    auth.check_access(r)
+    assert r.state.token_owner == "x_live_key"

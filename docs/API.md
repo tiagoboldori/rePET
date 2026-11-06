@@ -919,7 +919,7 @@ ajustado antes de ligar.
 ### Volume
 
 `nivel` é % do volume da câmera (100 = original, 0 = mudo, máximo
-`BROADCAST_VOLUME_MAX`=400); acima/abaixo dos limites o valor é ajustado, sem
+`BROADCAST_VOLUME_MAX`=400; o **painel web** se limita a 100% por conta própria, a API não); acima/abaixo dos limites o valor é ajustado, sem
 erro. Vale na hora, sem derrubar a live.
 
 #### Subir/descer
@@ -996,6 +996,16 @@ vez de falhar, e a resposta traz `"audio_da_camera": false` (com `true` a live u
 o som da câmera; `null` = ainda não sondado ou transmissão readotada após reinício
 da API). O volume só tem efeito quando há áudio da câmera. Dica: um volume 0 deixa
 a live muda; `start` com `reset=true` (padrão) volta o volume a 100%.
+
+**Redução de ruído do áudio.** Por padrão a transmissão com placar aplica ao áudio da câmera, antes do volume,
+um corte do grave (zumbido e vento no microfone, abaixo de 100 Hz) e uma redução de ruído de fundo (`afftdn`),
+no nível **médio**. O nível vem de `AUDIO_DENOISE` (`off`, `leve`, `medio` ou `forte`) no `.env` do servidor e vale
+quando a transmissão é **iniciada ou relançada**: uma que já está no ar continua como subiu. Custo medido no
+comando real: cerca de **+1% de um núcleo por transmissão**. Não afeta a **live direta** (o vídeo sai da câmera,
+sem passar pelo servidor), nem os replays, nem o volume (o filtro roda antes dele, então atua sempre no nível
+original da câmera). Sem áudio da câmera (trilha de silêncio) nada é aplicado, e, se o ffmpeg da máquina não tiver o
+filtro, a live sobe sem ele e o log avisa. O nível médio é discreto de propósito: rebaixa o ruído de fundo
+sem mexer em batidas, bola e vozes. Para ouvir a diferença antes de mudar, compare os níveis em amostras reais.
 
 ---
 
@@ -1087,17 +1097,43 @@ configurado).
 ## Painel web
 
 `http://SERVIDOR:8000/painel`: página para operar a transmissão pelo celular ou
-computador. Mostra um cartão por quadra e, conforme o modo:
+computador (layout responsivo, tema claro/escuro com alternância manual, identidade grená).
+O topo mostra contadores (quantas quadras ao vivo, transmissões com placar `n/limite`) e um
+indicador de conexão com a API. Cada quadra é um cartão com **duas abas**:
+
+**Aba Transmissão**, conforme o modo:
 
 - **Fora do ar:** nomes das duplas e botões *Iniciar transmissão com placar* e *Iniciar
   live direta*.
-- **Com placar:** +1 ponto, −1, *Fechar set* (pede confirmação: zera os pontos) e −1 set
-  para cada lado, volume − / +, edição de nomes, zerar placar e *Encerrar*.
+- **Com placar:** um placar que espelha a caixa grená da transmissão; por dupla, *+1 ponto*,
+  *− ponto*, *Fechar set* (pede confirmação: zera os pontos) e *− set*; volume por controle
+  deslizante e −/+, **limitado a 100%** (o painel nunca envia mais que isso e o + para no teto; se a API
+  tiver posto um valor maior, o painel mostra o valor real e o − volta direto a 100%); *Nomes e correções* (editar nomes, corrigir pontos e sets, zerar placar);
+  *Encerrar*. Mostra o tempo no ar, o tempo que falta até o prazo (barra que muda de cor perto do
+  fim), reinícios e se a câmera tem áudio.
 - **Direta:** *Encerrar*.
-- Avisos: quadra sem stream key, limite de 2 transmissões, ffmpeg tentando conectar,
-  câmera sem resposta, conflito entre os dois modos.
+- Avisos: quadra sem stream key (com atalho para cadastrá-la), limite de 2 transmissões,
+  ffmpeg tentando conectar, câmera sem resposta, key compartilhada com outra quadra no ar,
+  conflito entre os dois modos.
 
-A tela atualiza a cada 2 s a partir de `GET /status`.
+**Aba Destino** (usa as rotas [`/quadras/{id}/youtube`](#configurar-o-destino-da-transmissão-stream-key-e-rtmp)):
+
+- **Stream key:** mostra se está cadastrada e os 4 últimos caracteres; *Ver atual* revela a key
+  inteira (ela some sozinha em 30 s, e cada leitura fica no log do servidor); o campo e *Salvar key*
+  trocam a key, com confirmação e validação do formato antes de enviar.
+- **Servidor RTMP:** mostra a URL em uso, se é a padrão do servidor ou própria da quadra, e os hosts
+  aceitos; *Salvar URL* troca e *Usar a padrão* volta à global (com confirmação).
+- **Quadra transmitindo:** os campos ficam travados com um aviso (a API recusaria com `409`); ler a
+  key continua permitido. Quem trocou fica registrado no log do servidor como `painel:<usuário>`.
+
+A tela atualiza a cada 2 s a partir de `GET /status` (e pausa quando a aba do navegador fica em segundo
+plano). As ações pedem confirmação em janela própria, não no `confirm()` do navegador.
+
+**Arquivos e segurança.** `api/static/painel.{html,css,js}`, sem dependências nem fontes externas. A
+resposta do painel leva `Content-Security-Policy: default-src 'self'`, então **não use** script ou estilo
+inline, `innerHTML` nem imagens `data:`: todo texto vindo da API entra como texto, e os ícones são SVG
+montados pelo DOM. `test/test_panel_static.py` trava essas regras. Ao mudar CSS/JS, aumente o `?v=` no
+`painel.html` para o navegador não ficar com a versão antiga em cache.
 
 **Login.** Usa `ADMIN_USERNAME` e `ADMIN_PASSWORD` (os mesmos do `DELETE`); sem eles o
 login responde `503`. A sessão é um cookie `repet_painel` assinado (HMAC), `HttpOnly` e

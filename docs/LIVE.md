@@ -24,7 +24,7 @@ Referência de rotas, com exemplos de `curl`: [`API.md`](API.md).
 **Quando usar qual.** Placar ou volume ao vivo: transmissão com placar. Transmitir sem
 nada por cima, ou quando o servidor estiver ocupado: live direta, que não gasta CPU.
 
-Os dois podem ser operados pelo [painel web](API.md#painel-web) (`/painel`) ou pela API.
+Os dois podem ser operados pelo [painel web](API.md#painel-web) (`/painel`, que também edita a key e a URL RTMP de cada quadra na aba *Destino*) ou pela API.
 
 **Para onde cada quadra transmite.** O destino (stream key e, se quiser, URL RTMP) fica no cadastro da
 quadra e pode ser consultado e trocado pela API, sem editar arquivo:
@@ -68,6 +68,7 @@ câmera ──RTSP──▶ ffmpeg ──RTMP──▶ YouTube
    API ── FIFO (stdin do ffmpeg): comandos de volume e o 'q' para encerrar
 ```
 
+- **Áudio.** O áudio da câmera passa por um corte do grave e por uma redução de ruído (`AUDIO_DENOISE`, padrão `medio`) **antes** do volume e do upmix para 44,1 kHz estéreo (assim processa 5,5x menos amostras e atua sempre no nível original). Medido no comando real: **+1,1% de um núcleo** sobre ~114%. A live direta não tem isso (sai da câmera). Trocar o nível exige reiniciar a API e vale na próxima (re)largada da transmissão.
 - **Visual.** Nomes, sets e pontos ficam numa caixa **grená** (RGB `7B1E2B`, 85% de opacidade) no canto
   inferior esquerdo; a constante é `SCOREBOARD_BOX_COLOR` em `api/broadcast.py`. A cor é definida na linha de
   comando do ffmpeg, então **vale na próxima vez que a transmissão for iniciada ou relançada**: uma
@@ -176,6 +177,7 @@ Todas em `.env` (modelo em `.env.example`); mudar exige reiniciar a API.
 | `BROADCAST_MAX_CONCURRENT` | `2` | Transmissões com placar simultâneas |
 | `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `ultrafast` / `4500k` / `4` | Encode: preset x264, bitrate (sempre `<n>k`) e núcleos por transmissão |
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do volume e teto (%) |
+| `AUDIO_DENOISE` | `medio` | Redução de ruído do áudio da transmissão com placar: `off`, `leve`, `medio`, `forte`. Corta o grave (< 100 Hz) e rebaixa o ruído de fundo antes do volume; ~+1% de um núcleo por transmissão; vale ao iniciar/relançar; não afeta a live direta |
 | `LIVE_MONITOR_INTERVAL_SECONDS` | `15` | De quanto em quanto tempo se pergunta às câmeras pela live direta |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | vazio | Login do painel (e do `DELETE`); vazio = login `503` |
 | `PANEL_SESSION_HOURS` / `PANEL_SECRET` | `12` / vazio | Validade da sessão; segredo extra que assina o cookie |

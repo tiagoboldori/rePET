@@ -366,7 +366,7 @@ def youtube_config_put(quadra_id: str, body: StreamConfigUpdate, request: Reques
         body.rtmp_url if "rtmp_url" in fields else stream_config.UNSET,
     )
     if changed:  # auditoria: quem e o quê, nunca a key
-        who = getattr(request.state, "token_owner", "sessão do painel ou X-Live-Key")
+        who = getattr(request.state, "token_owner", "desconhecido")
         print(f"[youtube] {quadra_id}: destino da transmissão alterado ({', '.join(sorted(fields))}) por {who}.")
     return {"status": "atualizada" if changed else "sem_mudanca", **view}
 
@@ -380,7 +380,7 @@ class RtmpUrlUpdate(BaseModel):
 
 
 def _audit(request: Request, quadra_id: str, what: str) -> None:
-    who = getattr(request.state, "token_owner", "sessão do painel ou X-Live-Key")
+    who = getattr(request.state, "token_owner", "desconhecido")
     print(f"[youtube] {quadra_id}: {what} por {who}.")  # nunca a key
 
 

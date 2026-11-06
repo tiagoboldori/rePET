@@ -154,6 +154,29 @@ BROADCAST_THREADS = int(os.environ.get("BROADCAST_THREADS", "4"))
 BROADCAST_FONT = os.environ.get("BROADCAST_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 BROADCAST_VOLUME_STEP = int(os.environ.get("BROADCAST_VOLUME_STEP", "10"))  # % por clique
 BROADCAST_VOLUME_MAX = int(os.environ.get("BROADCAST_VOLUME_MAX", "400"))  # % do original
+
+# Redução de ruído do áudio da transmissão COM placar (a live direta sai da câmera e não passa pelo servidor).
+# off | leve | medio | forte; o padrão é medio. Vale quando a transmissão é iniciada ou relançada.
+_DENOISE_ALIASES = {
+    "off": "off", "0": "off", "false": "off", "no": "off", "nao": "off", "não": "off", "desligado": "off", "none": "off",
+    "leve": "leve", "medio": "medio", "médio": "medio", "forte": "forte",
+}
+
+
+def parse_audio_denoise(raw: str | None) -> str:
+    """Normaliza AUDIO_DENOISE. Valor vazio ou desconhecido cai no padrão (medio), com aviso: um erro de digitação
+    não pode derrubar a API (um ValueError aqui impediria o servidor de subir)."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return "medio"
+    level = _DENOISE_ALIASES.get(value)
+    if level is None:
+        print(f"[config] aviso: AUDIO_DENOISE='{value}' desconhecido (use off, leve, medio ou forte); usando medio.")
+        return "medio"
+    return level
+
+
+AUDIO_DENOISE = parse_audio_denoise(os.environ.get("AUDIO_DENOISE", "medio"))
 BROADCAST_DIR = Path(os.environ.get("BROADCAST_DIR", str(_ROOT / ".data" / "broadcast")))
 BROADCAST_STATE_FILE = Path(
     os.environ.get("BROADCAST_STATE_FILE", str(_ROOT / ".data" / "broadcast_state.json"))

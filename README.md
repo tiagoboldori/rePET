@@ -415,7 +415,7 @@ Público (sem autenticação):
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` · `PUT .../volume` | Volume ao vivo, em % do da câmera (100 = original) |
 | `GET /broadcast`, `GET /broadcast/{quadra_id}`, `PUT .../placar`, `PUT .../nomes`, `POST .../placar/zerar` | Estado e correções manuais |
 | `GET /status` | Uma linha por quadra com os dois modos (direta e placar), sem consultar câmera na hora |
-| `GET /painel` | **Painel web** de controle da transmissão (login com `ADMIN_USERNAME`/`ADMIN_PASSWORD`) |
+| `GET /painel` | **Painel web** de controle da transmissão e do destino (key e RTMP) de cada quadra (login com `ADMIN_USERNAME`/`ADMIN_PASSWORD`) |
 
 ### Como funciona na prática (live, placar, reboot, stream key)
 
@@ -451,8 +451,9 @@ uma enquanto outra com a mesma key está no ar responde `409`, e o painel avisa 
 o botão.
 
 **Painel web:** `http://SERVIDOR:8000/painel` (a mesma porta 8000 da API; celular ou computador) liga/encerra as
-duas modalidades e controla placar, sets, nomes e volume. Exige `ADMIN_USERNAME` e
-`ADMIN_PASSWORD` no `.env`; trafega em HTTP puro (na rede interna). Os dois modos, os
+duas modalidades e controla placar, sets, nomes e volume (até 100%, o volume original da câmera), e (aba **Destino**) consulta e troca a stream
+key e a URL RTMP de cada quadra. Tema claro/escuro, abas por cartão e janelas de confirmação próprias.
+Exige `ADMIN_USERNAME` e `ADMIN_PASSWORD` no `.env`; trafega em HTTP puro (na rede interna). Os dois modos, os
 casos de borda tratados e o que ainda não é coberto estão em
 [`docs/LIVE.md`](docs/LIVE.md); as rotas, com exemplos, em [`docs/API.md`](docs/API.md).
 
@@ -493,6 +494,7 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
 | `BROADCAST_MAX_CONCURRENT` / `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `2` / `ultrafast` / `4500k` / `4` | Transmissão com placar: simultâneas, preset x264, bitrate e núcleos por transmissão |
 | `BROADCAST_DIR` / `BROADCAST_STATE_FILE` / `BROADCAST_LOG_DIR` | `.data/broadcast` / `.data/broadcast_state.json` / `logs/` | Overlay e FIFO por quadra, estado das transmissões (placar, volume, pid, prazo) e logs do ffmpeg |
+| `AUDIO_DENOISE` | `medio` | Redução de ruído do áudio da transmissão **com placar**: `off`, `leve`, `medio` ou `forte` (~+1% de um núcleo por transmissão; vale quando a transmissão é iniciada/relançada; não afeta live direta nem replays) |
 | `BROADCAST_FONT` | `DejaVuSans-Bold.ttf` do sistema | Fonte do placar |
 | `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do `volume/up\|down` e teto, em % |
 | `LIVE_MONITOR_INTERVAL_SECONDS` | `15` | Intervalo da verificação (em segundo plano) das lives diretas nas câmeras |
@@ -586,7 +588,7 @@ deploy não usar `/opt/replay-system`.
 ### Testes
 
 ```bash
-python -m pytest test/ -v         # db, reconcile, retenção local, integração externa, auth, live, placar, destino da transmissão
+python -m pytest test/ -v         # db, reconcile, retenção local, integração externa, auth, live, placar, destino da transmissão, regras do painel
 bash test/run_pipeline_test.sh    # captura + corte, fonte sintética (ffmpeg testsrc)
 bash test/run_api_test.sh         # uvicorn + curl ponta a ponta, banco isolado
 ```

@@ -1,13 +1,66 @@
 "use strict";
-/* Painel de transmissão. Sem dependências. Todo texto vindo da API entra por textContent. */
+/* Painel de transmissão do rePET. Sem dependências.
+ * Regra de segurança: todo texto vindo da API entra por textContent/createTextNode, nunca por innerHTML.
+ * Rotas usadas: /status (a cada 2 s), /broadcast/*, /live/*, e o destino da transmissão:
+ *   GET /quadras/{id}/youtube          resumo (key mascarada, URL efetiva, hosts permitidos)
+ *   GET/PUT /quadras/{id}/youtube/key  a key inteira / troca da key
+ *   PUT /quadras/{id}/youtube/url      troca da URL RTMP (null volta à global)
+ */
 
 const POLL_MS = 2000;
+const REVEAL_MS = 30000;                      // a key mostrada some sozinha depois disto
+const VOLUME_MAX = 100;                       // teto do volume no painel: 100% é o volume original da câmera
+const VOLUME_STEP = 10;                       // passo dos botões − e +
+const KEY_RE = /^[A-Za-z0-9_-]{8,128}$/;      // o mesmo formato que a API aceita
+const URL_RE = /^rtmp:\/\/\S+$/i;
 const $ = (sel, root = document) => root.querySelector(sel);
-const cards = new Map(); // quadra_id -> {el, ...}
+const cards = new Map();                      // quadra_id -> cartão
 let pollTimer = null;
 let overview = null;
+let lastOk = 0;
+let falhando = false;
 
-// --- utilidades -------------------------------------------------------------
+// --- ícones (SVG montado pelo DOM: a CSP não deixa estilo/imagem inline) ------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const ICONS = {
+  clock: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M12 7v5l3 2" }]],
+  volume: [["path", { d: "M4 9v6h4l5 4V5L8 9H4z" }], ["path", { d: "M16.5 9a4 4 0 0 1 0 6" }]],
+  mute: [["path", { d: "M4 9v6h4l5 4V5L8 9H4z" }], ["path", { d: "M17 9l4 6M21 9l-4 6" }]],
+  key: [["circle", { cx: 8, cy: 15, r: 4 }], ["path", { d: "M11 12l9-9M16 7l3 3M14 9l2 2" }]],
+  link: [["path", { d: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" }], ["path", { d: "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" }]],
+  eye: [["path", { d: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" }], ["circle", { cx: 12, cy: 12, r: 3 }]],
+  eyeoff: [["path", { d: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" }], ["circle", { cx: 12, cy: 12, r: 3 }], ["path", { d: "M3 3l18 18" }]],
+  lock: [["rect", { x: 5, y: 11, width: 14, height: 9, rx: 2 }], ["path", { d: "M8 11V8a4 4 0 0 1 8 0v3" }]],
+  alert: [["path", { d: "M12 3l10 18H2L12 3z" }], ["path", { d: "M12 10v5M12 18v.5" }]],
+  check: [["path", { d: "M5 12l5 5 9-10" }]],
+  signal: [["path", { d: "M5 12a7 7 0 0 1 14 0" }], ["path", { d: "M8.5 12a3.5 3.5 0 0 1 7 0" }], ["circle", { cx: 12, cy: 12, r: 1 }]],
+  grid: [["rect", { x: 4, y: 4, width: 7, height: 7, rx: 1 }], ["rect", { x: 13, y: 4, width: 7, height: 7, rx: 1 }], ["rect", { x: 4, y: 13, width: 7, height: 7, rx: 1 }], ["rect", { x: 13, y: 13, width: 7, height: 7, rx: 1 }]],
+  sun: [["circle", { cx: 12, cy: 12, r: 4 }], ["path", { d: "M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5" }]],
+  moon: [["path", { d: "M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z" }]],
+};
+
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("class", "ico");
+  svg.setAttribute("aria-hidden", "true");
+  for (const [tag, attrs] of ICONS[name]) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    svg.append(node);
+  }
+  return svg;
+}
+
+// --- utilidades -------------------------------------------------------------------
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  return node;
+}
 
 function fmtDuration(total) {
   if (total == null) return "–";
@@ -17,12 +70,19 @@ function fmtDuration(total) {
 
 let toastTimer = null;
 function toast(message, ok = false) {
-  const el = $("#toast");
-  el.textContent = message;
-  el.className = ok ? "toast ok" : "toast";
-  el.hidden = false;
+  const box = $("#toast");
+  box.replaceChildren(icon(ok ? "check" : "alert"), el("span", "", message));
+  box.className = ok ? "toast ok" : "toast";
+  box.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, ok ? 2000 : 5000);
+  toastTimer = setTimeout(() => { box.hidden = true; }, ok ? 2200 : 6000);
+}
+
+function errorText(data, status) {
+  const d = data && data.detail;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d) && d.length) return "Dados inválidos: " + d.map((x) => x.msg).join("; ");
+  return `Erro ${status}`;
 }
 
 async function api(path, method = "GET", body) {
@@ -35,17 +95,78 @@ async function api(path, method = "GET", body) {
   let data = null;
   try { data = await resp.json(); } catch { /* corpo vazio */ }
   if (resp.status === 401) { showLogin(); throw new Error("Sessão expirada."); }
-  if (!resp.ok) {
-    const detail = data && data.detail;
-    throw new Error(typeof detail === "string" ? detail : `Erro ${resp.status}`);
-  }
+  if (!resp.ok) throw new Error(errorText(data, resp.status));
   return data;
 }
 
-// --- login ------------------------------------------------------------------
+/* Janela de confirmação própria (o confirm() do navegador some em alguns celulares e não dá para estilizar). */
+function confirmar({ titulo, texto, ok = "Confirmar", perigo = false }) {
+  const dlg = $("#dlg");
+  if (typeof dlg.showModal !== "function") return Promise.resolve(window.confirm(`${titulo}\n\n${texto}`));
+  $("#dlg-titulo").textContent = titulo;
+  $("#dlg-texto").textContent = texto;
+  $("#dlg-ok").textContent = ok;
+  dlg.classList.toggle("perigo", perigo);
+  return new Promise((resolve) => {
+    const onClose = () => { dlg.removeEventListener("close", onClose); resolve(dlg.returnValue === "ok"); };
+    dlg.addEventListener("close", onClose);
+    dlg.returnValue = "";
+    dlg.showModal();
+  });
+}
+
+/* Botão que se desabilita enquanto a chamada roda. `setDisabled` é a trava vinda das regras do cartão:
+ * terminar uma chamada não pode reabilitar um botão que o cartão manteve travado. */
+function button(label, cls, onclick, ico) {
+  const b = el("button", cls);
+  b.type = "button";
+  setLabel(b, label, ico);
+  b.addEventListener("click", async () => {
+    b.dataset.ocupado = "1";
+    b.disabled = true;
+    try { await onclick(); } catch (e) { toast(e.message); } finally {
+      b.dataset.ocupado = "";
+      b.disabled = b.dataset.travado === "1";
+    }
+  });
+  return b;
+}
+function setLabel(b, label, ico) {
+  b.replaceChildren(...(ico ? [icon(ico)] : []), ...(label ? [document.createTextNode(label)] : []));
+}
+function setDisabled(b, value) {
+  b.dataset.travado = value ? "1" : "";
+  b.disabled = Boolean(value) || b.dataset.ocupado === "1";
+}
+
+// --- tema -------------------------------------------------------------------------
+
+function temaAtual() {
+  return document.documentElement.dataset.tema || (matchMedia("(prefers-color-scheme: light)").matches ? "claro" : "escuro");
+}
+function pintarBotaoTema() {
+  $("#tema").replaceChildren(icon(temaAtual() === "claro" ? "moon" : "sun"));
+}
+$("#tema").addEventListener("click", () => {
+  const novo = temaAtual() === "claro" ? "escuro" : "claro";
+  document.documentElement.dataset.tema = novo;
+  try { localStorage.setItem("repet-tema", novo); } catch { /* modo privado */ }
+  pintarBotaoTema();
+});
+try {
+  const salvo = localStorage.getItem("repet-tema");
+  if (salvo === "claro" || salvo === "escuro") document.documentElement.dataset.tema = salvo;
+} catch { /* sem localStorage */ }
+pintarBotaoTema();
+
+// --- login ------------------------------------------------------------------------
 
 function showLogin() {
   clearInterval(pollTimer);
+  for (const card of cards.values()) clearTimeout(card.dest.revealTimer);
+  cards.clear();
+  $("#quadras").replaceChildren();   // nada de key ou placar fica na tela de quem saiu
+  overview = null;
   $("#app").hidden = true;
   $("#login").hidden = false;
   $("#usuario").focus();
@@ -56,6 +177,10 @@ async function showApp(user) {
   $("#app").hidden = false;
   $("#usuario-logado").textContent = user;
   await refresh();
+  startPolling();
+}
+
+function startPolling() {
   clearInterval(pollTimer);
   pollTimer = setInterval(refresh, POLL_MS);
 }
@@ -71,7 +196,7 @@ $("#login-form").addEventListener("submit", async (ev) => {
       body: JSON.stringify({ usuario: $("#usuario").value, senha: $("#senha").value }),
     });
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Erro ${resp.status}`);
+    if (!resp.ok) throw new Error(errorText(data, resp.status));
     $("#senha").value = "";
     await showApp(data.usuario);
   } catch (e) {
@@ -85,74 +210,165 @@ $("#sair").addEventListener("click", async () => {
   showLogin();
 });
 
-// --- cartões ----------------------------------------------------------------
+// Aba em segundo plano não precisa consultar a API a cada 2 s.
+document.addEventListener("visibilitychange", () => {
+  if ($("#app").hidden) return;
+  if (document.hidden) clearInterval(pollTimer);
+  else { refresh(); startPolling(); }
+});
 
-function el(tag, cls, text) {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text != null) node.textContent = text;
-  return node;
+// --- cartão: aba "Transmissão" ----------------------------------------------------
+
+function buildScoreboard(card) {
+  const sb = el("div", "sb");
+  const cab = el("div", "sb-cab");
+  cab.append(el("span"), el("span", "", "SETS"), el("span", "", "PONTOS"));
+  sb.append(cab);
+  for (const side of ["a", "b"]) {
+    const lin = el("div", "sb-lin");
+    card[`nome${side}`] = el("span", "nome");
+    card[`sets${side}`] = el("span", "sets", "0");
+    card[`pontos${side}`] = el("span", "pontos", "0");
+    lin.append(card[`nome${side}`], card[`sets${side}`], card[`pontos${side}`]);
+    sb.append(lin);
+  }
+  sb.append(el("p", "sb-rodape", "Assim aparece na transmissão"));
+  return sb;
 }
 
-function button(label, cls, onclick) {
-  const b = el("button", cls, label);
-  b.type = "button";
-  b.addEventListener("click", async () => {
-    b.disabled = true;
-    try { await onclick(); } catch (e) { toast(e.message); } finally { b.disabled = false; }
-  });
-  return b;
-}
-
-function buildSide(card, side) {
+function buildControls(card, side) {
   const q = card.id;
-  const box = el("div", "lado");
-  card[`nome${side}`] = el("div", "nome");
-  card[`sets${side}`] = el("div", "sets", "0");
-  card[`pontos${side}`] = el("div", "pontos", "0");
-  const celSets = el("div", "cel"), celPontos = el("div", "cel");
-  celSets.append(el("div", "rotulo", "Sets"), card[`sets${side}`]);
-  celPontos.append(el("div", "rotulo", "Pontos"), card[`pontos${side}`]);
-  const acoes = el("div", "acoes");
-  const call = (path, method = "POST") => async () => { applyPlacar(card, await api(`/broadcast/${q}/${path}`, method)); };
-  acoes.append(
-    button("+1 ponto", "mais", call(`ponto/${side}`)),
-    button("−1", "secondary", call(`ponto/${side}?delta=-1`)),
-    button("Fechar set", "", async () => {
-      const nome = card[`nome${side}`].textContent;
-      if (!confirm(`Fechar o set para ${nome}? Os pontos dos dois lados voltam a 0.`)) return;
-      applyPlacar(card, await api(`/broadcast/${q}/set/${side}`, "POST"));
-    }),
-    button("−1 set", "secondary", call(`set/${side}?delta=-1`)),
-  );
-  box.append(card[`nome${side}`], celSets, celPontos, acoes);
+  const box = el("div", "ctrl");
+  card[`tit${side}`] = el("h3");
+  const call = (path) => async () => { applyPlacar(card, await api(`/broadcast/${q}/${path}`, "POST")); };
+  const par = el("div", "par");
+  const menosPonto = button("− ponto", "secondary", call(`ponto/${side}?delta=-1`));
+  menosPonto.title = "Desfaz um ponto";
+  const menosSet = button("− set", "secondary", call(`set/${side}?delta=-1`));
+  menosSet.title = "Tira um set (não mexe nos pontos)";
+  par.append(menosPonto, menosSet);
+  const fechar = button("Fechar set", "set", async () => {
+    const nome = card[`nome${side}`].textContent;
+    const sim = await confirmar({
+      titulo: `Fechar o set para ${nome}?`,
+      texto: "Soma 1 set e zera os pontos dos dois lados.",
+      ok: "Fechar set",
+    });
+    if (sim) applyPlacar(card, await api(`/broadcast/${q}/set/${side}`, "POST"));
+  });
+  box.append(card[`tit${side}`], button("+1 ponto", "ok mais", call(`ponto/${side}`)), par, fechar);
   return box;
 }
 
-function buildCard(quadra) {
-  const q = quadra.quadra_id;
-  const card = { id: q, root: el("section", "card") };
-  const head = el("header");
-  const titulo = el("div");
-  card.titulo = el("h2");
-  titulo.append(card.titulo, el("div", "sub", q));
-  card.badge = el("span", "badge");
-  head.append(titulo, card.badge);
-  card.info = el("p", "info");
-  card.aviso = el("p", "aviso"); card.aviso.hidden = true;
+function buildVolume(card) {
+  const q = card.id;
+  const wrap = el("div", "stack");
+  const vol = el("div", "vol");
+  card.btnVolMenos = button("−", "", async () => {
+    await enviar(Math.min(VOLUME_MAX, atual() - VOLUME_STEP));   // acima do teto (valor posto pela API), o − já volta ao teto
+  });
+  card.btnVolMais = button("+", "", async () => {
+    if (atual() >= VOLUME_MAX) return;                           // no teto: não chama a API
+    await enviar(Math.min(VOLUME_MAX, atual() + VOLUME_STEP));
+  });
+  card.btnVolMenos.setAttribute("aria-label", "Diminuir volume");
+  card.btnVolMais.setAttribute("aria-label", "Aumentar volume");
+  card.volIcon = el("span");
+  card.volIcon.append(icon("volume"));
+  card.volRange = el("input");
+  Object.assign(card.volRange, { type: "range", min: 0, max: VOLUME_MAX, step: 5, value: 100 });
+  card.volRange.setAttribute("aria-label", "Volume da câmera, em porcentagem");
+  card.volOut = el("output", "", "100%");
+  const enviar = async (nivel) => { applyPlacar(card, await api(`/broadcast/${q}/volume`, "PUT", { nivel: Math.max(0, Math.min(VOLUME_MAX, nivel)) })); };
+  // Os botões calculam o valor novo aqui (e usam PUT) em vez de chamar volume/up|down, que somam um passo fixo
+  // no servidor e passariam do teto (95% + 10 = 105%).
+  const atual = () => (card.ultimoPlacar ? card.ultimoPlacar.volume : Number(card.volRange.value));
+  card.volRange.addEventListener("input", () => {
+    card.volEditando = true;
+    card.volOut.textContent = `${card.volRange.value}%`;
+    setDisabled(card.btnVolMais, Number(card.volRange.value) >= VOLUME_MAX);
+  });
+  card.volRange.addEventListener("change", async () => {
+    try { await enviar(Number(card.volRange.value)); } catch (e) { toast(e.message); } finally { card.volEditando = false; }
+  });
+  vol.append(
+    card.volIcon, card.volRange, card.volOut,
+    card.btnVolMenos,
+    card.btnVolMais,
+  );
+  wrap.append(vol, el("p", "hint", "100% é o volume original da câmera e o máximo permitido no painel."));
+  return wrap;
+}
 
-  // ---- fora do ar
-  card.secOff = el("div", "sec");
+function numField(label) {
+  const wrap = el("label", "", label);
+  const input = el("input");
+  Object.assign(input, { type: "number", min: 0, step: 1, inputMode: "numeric" });
+  wrap.append(input);
+  return { wrap, input };
+}
+
+function buildCorrecoes(card) {
+  const q = card.id;
+  const det = el("details");
+  det.append(el("summary", "", "Nomes e correções"));
+  const box = el("div", "stack");
+
+  const nomes = el("div", "nomes");
+  card.edA = el("input"); card.edA.maxLength = 14; card.edA.setAttribute("aria-label", "Nome da dupla A");
+  card.edB = el("input"); card.edB.maxLength = 14; card.edB.setAttribute("aria-label", "Nome da dupla B");
+  nomes.append(card.edA, card.edB);
+  const salvarNomes = button("Salvar nomes", "secondary", async () => {
+    applyPlacar(card, await api(`/broadcast/${q}/nomes`, "PUT", { nome_a: card.edA.value, nome_b: card.edB.value }));
+    toast("Nomes salvos.", true);
+  });
+
+  const nums = el("div", "nomes");
+  const f = { pa: numField("Pontos A"), pb: numField("Pontos B"), sa: numField("Sets A"), sb: numField("Sets B") };
+  card.fields = f;
+  nums.append(f.pa.wrap, f.pb.wrap, f.sa.wrap, f.sb.wrap);
+  const aplicar = button("Aplicar correção", "secondary", async () => {
+    const lido = {};
+    for (const [chave, campo] of [["pontos_a", f.pa], ["pontos_b", f.pb], ["sets_a", f.sa], ["sets_b", f.sb]]) {
+      const n = Number(campo.input.value);
+      if (campo.input.value === "" || !Number.isInteger(n) || n < 0) throw new Error("Use números inteiros, 0 ou mais.");
+      lido[chave] = n;
+    }
+    applyPlacar(card, await api(`/broadcast/${q}/placar`, "PUT", lido));
+    toast("Placar corrigido.", true);
+  });
+  const zerar = button("Zerar placar", "danger", async () => {
+    const sim = await confirmar({ titulo: "Zerar o placar?", texto: "Pontos e sets dos dois lados voltam a 0.", ok: "Zerar", perigo: true });
+    if (sim) { applyPlacar(card, await api(`/broadcast/${q}/placar/zerar`, "POST")); fillFields(card); }
+  });
+  det.addEventListener("toggle", () => { if (det.open) fillFields(card); });
+  box.append(nomes, salvarNomes, nums, aplicar, zerar);
+  det.append(box);
+  return det;
+}
+
+function fillFields(card) {
+  const p = card.ultimoPlacar;
+  if (!p) return;
+  card.fields.pa.input.value = p.placar.a.pontos; card.fields.pb.input.value = p.placar.b.pontos;
+  card.fields.sa.input.value = p.placar.a.sets; card.fields.sb.input.value = p.placar.b.sets;
+}
+
+function buildTransmissao(card) {
+  const q = card.id;
+  const pan = el("div", "aba");
+
+  // fora do ar
+  card.secOff = el("div", "stack");
   const nomes = el("div", "nomes");
   card.inA = el("input"); card.inA.placeholder = "Dupla A"; card.inA.maxLength = 14; card.inA.setAttribute("aria-label", "Nome da dupla A");
   card.inB = el("input"); card.inB.placeholder = "Dupla B"; card.inB.maxLength = 14; card.inB.setAttribute("aria-label", "Nome da dupla B");
   nomes.append(card.inA, card.inB);
-  card.btnPlacar = button("Iniciar transmissão com placar", "primary", async () => {
-    const body = { nome_a: card.inA.value || null, nome_b: card.inB.value || null };
-    await api(`/broadcast/${q}/start`, "POST", body);
+  card.btnPlacar = button("Iniciar transmissão com placar", "primary grande", async () => {
+    await api(`/broadcast/${q}/start`, "POST", { nome_a: card.inA.value || null, nome_b: card.inB.value || null });
     toast("Transmissão iniciada.", true);
     await refresh();
-  });
+  }, "signal");
   card.btnDireta = button("Iniciar live direta (sem placar)", "secondary", async () => {
     await api(`/live/${q}`, "POST");
     toast("Live direta iniciada.", true);
@@ -160,64 +376,316 @@ function buildCard(quadra) {
   });
   card.secOff.append(nomes, card.btnPlacar, card.btnDireta);
 
-  // ---- com placar
-  card.secPlacar = el("div", "sec");
-  const placar = el("div", "placar");
-  placar.append(buildSide(card, "a"), buildSide(card, "b"));
-  const vol = el("div", "volume");
-  card.volOut = el("output", "", "100%");
-  vol.append(
-    button("−", "", async () => applyPlacar(card, await api(`/broadcast/${q}/volume/down`, "POST"))),
-    card.volOut,
-    button("+", "", async () => applyPlacar(card, await api(`/broadcast/${q}/volume/up`, "POST"))),
-  );
-  const det = el("details");
-  det.append(el("summary", "", "Nomes e correções"));
-  const detBox = el("div", "sec");
-  const n2 = el("div", "nomes");
-  card.edA = el("input"); card.edA.maxLength = 14; card.edA.setAttribute("aria-label", "Nome da dupla A");
-  card.edB = el("input"); card.edB.maxLength = 14; card.edB.setAttribute("aria-label", "Nome da dupla B");
-  n2.append(card.edA, card.edB);
-  const linha = el("div", "linha");
-  linha.append(
-    button("Salvar nomes", "secondary", async () => {
-      applyPlacar(card, await api(`/broadcast/${q}/nomes`, "PUT", { nome_a: card.edA.value, nome_b: card.edB.value }));
-      toast("Nomes salvos.", true);
-    }),
-    button("Zerar placar", "danger", async () => {
-      if (!confirm("Zerar pontos e sets dos dois lados?")) return;
-      applyPlacar(card, await api(`/broadcast/${q}/placar/zerar`, "POST"));
-    }),
-  );
-  detBox.append(n2, linha);
-  det.append(detBox);
+  // com placar
+  card.secPlacar = el("div", "stack");
+  const ctrls = el("div", "ctrls");
+  ctrls.append(buildControls(card, "a"), buildControls(card, "b"));
   card.btnStopPlacar = button("Encerrar transmissão", "danger", async () => {
-    if (!confirm(`Encerrar a transmissão de ${card.titulo.textContent}?`)) return;
+    const sim = await confirmar({
+      titulo: `Encerrar a transmissão de ${card.titulo.textContent}?`,
+      texto: "O vídeo para de ir ao YouTube. O placar e os nomes ficam guardados.",
+      ok: "Encerrar", perigo: true,
+    });
+    if (!sim) return;
     await api(`/broadcast/${q}/stop`, "POST");
     toast("Transmissão encerrada.", true);
     await refresh();
   });
-  card.secPlacar.append(placar, el("div", "sub", "Volume da câmera"), vol, det, card.btnStopPlacar);
+  card.secPlacar.append(buildScoreboard(card), ctrls, buildVolume(card), buildCorrecoes(card), card.btnStopPlacar);
 
-  // ---- direta
-  card.secDireta = el("div", "sec");
+  // direta
+  card.secDireta = el("div", "stack");
   card.btnStopDireta = button("Encerrar live direta", "danger", async () => {
-    if (!confirm(`Encerrar a live direta de ${card.titulo.textContent}?`)) return;
+    const sim = await confirmar({
+      titulo: `Encerrar a live direta de ${card.titulo.textContent}?`,
+      texto: "A câmera para de enviar vídeo ao YouTube.", ok: "Encerrar", perigo: true,
+    });
+    if (!sim) return;
     await api(`/live/${q}/stop`, "POST");
     toast("Live direta encerrada.", true);
     await refresh();
   });
   card.secDireta.append(card.btnStopDireta);
 
-  card.root.append(head, card.info, card.aviso, card.secOff, card.secPlacar, card.secDireta);
+  pan.append(card.secOff, card.secPlacar, card.secDireta);
+  return pan;
+}
+
+// --- cartão: aba "Destino" (stream key e URL RTMP) ---------------------------------
+
+function blocoTitulo(ico, texto) {
+  const tit = el("div", "bloco-tit");
+  const h = el("h3");
+  h.append(icon(ico), document.createTextNode(texto));
+  const tag = el("span", "tag", "carregando…");
+  tit.append(h, tag);
+  return { tit, tag };
+}
+
+function buildDestino(card) {
+  const q = card.id;
+  const d = card.dest = { data: null, dirtyKey: false, dirtyUrl: false, revealed: false, revealTimer: null, lock: null };
+  const pan = el("div", "aba");
+
+  d.lock = el("p", "trava");
+  d.lock.append(icon("lock"), el("span", "", "Esta quadra está transmitindo. Encerre a transmissão para trocar a key ou a URL."));
+  d.lock.hidden = true;
+
+  // ---- stream key
+  const bk = el("section", "bloco");
+  const tk = blocoTitulo("key", "Stream key do YouTube");
+  d.keyTag = tk.tag;
+  d.keyShared = el("p", "hint"); d.keyShared.hidden = true;
+  d.keyInput = el("input", "mono");
+  Object.assign(d.keyInput, { type: "password", placeholder: "Nova stream key", maxLength: 128, autocomplete: "new-password", spellcheck: false });
+  d.keyInput.setAttribute("autocapitalize", "off");
+  d.keyInput.setAttribute("aria-label", `Stream key de ${q}`);
+  d.keyInput.addEventListener("input", () => { d.dirtyKey = true; hideErr(d.keyErr); });
+  d.btnShow = button("Ver atual", "secondary", () => toggleReveal(card), "eye");
+  const campo = el("div", "campo-senha");
+  campo.append(d.keyInput, d.btnShow);
+  d.keyErr = el("p", "erro-inline"); d.keyErr.hidden = true;
+  d.btnSaveKey = button("Salvar key", "primary", () => saveKey(card), "check");
+  bk.append(tk.tit, d.keyShared, campo,
+    el("p", "hint", "8 a 128 caracteres: letras, números, - e _ (sem espaços). A key vale para a live direta e para a transmissão com placar."),
+    d.keyErr, d.btnSaveKey);
+
+  // ---- URL RTMP
+  const bu = el("section", "bloco");
+  const tu = blocoTitulo("link", "Servidor RTMP");
+  d.urlTag = tu.tag;
+  d.urlInput = el("input", "mono");
+  Object.assign(d.urlInput, { type: "text", placeholder: "rtmp://a.rtmp.youtube.com/live2", maxLength: 200, spellcheck: false });
+  d.urlInput.setAttribute("inputmode", "url");
+  d.urlInput.setAttribute("autocapitalize", "off");
+  d.urlInput.setAttribute("aria-label", `URL RTMP de ${q}`);
+  d.urlInput.addEventListener("input", () => { d.dirtyUrl = true; hideErr(d.urlErr); });
+  d.hosts = el("p", "hint");
+  d.urlErr = el("p", "erro-inline"); d.urlErr.hidden = true;
+  d.btnSaveUrl = button("Salvar URL", "primary", () => saveUrl(card, d.urlInput.value.trim()), "check");
+  d.btnUrlPadrao = button("Usar a padrão", "secondary", () => resetUrl(card));
+  const linha = el("div", "linha");
+  linha.append(d.btnSaveUrl, d.btnUrlPadrao);
+  bu.append(tu.tit, d.urlInput, d.hosts, d.urlErr, linha);
+
+  pan.append(d.lock, bk, bu);
+  return pan;
+}
+
+function hideErr(p) { p.hidden = true; p.textContent = ""; }
+function showErr(p, message) { p.textContent = message; p.hidden = false; }
+
+function hideKey(card) {
+  const d = card.dest;
+  clearTimeout(d.revealTimer);
+  d.keyInput.type = "password";
+  if (!d.dirtyKey) d.keyInput.value = "";   // só some o que foi lido; o que a pessoa digitou fica
+  d.revealed = false;
+  setLabel(d.btnShow, "Ver atual", "eye");
+}
+
+async function toggleReveal(card) {
+  const d = card.dest;
+  hideErr(d.keyErr);
+  if (d.revealed) { hideKey(card); return; }
+  const r = await api(`/quadras/${card.id}/youtube/key`);   // devolve a key inteira; a API registra a leitura no log
+  if (!r.tem_stream_key) { showErr(d.keyErr, "Esta quadra ainda não tem key cadastrada."); return; }
+  d.keyInput.value = r.stream_key;
+  d.keyInput.type = "text";
+  d.dirtyKey = false;
+  d.revealed = true;
+  setLabel(d.btnShow, "Ocultar", "eyeoff");
+  clearTimeout(d.revealTimer);
+  d.revealTimer = setTimeout(() => hideKey(card), REVEAL_MS);
+}
+
+async function saveKey(card) {
+  const d = card.dest;
+  hideErr(d.keyErr);
+  const valor = d.keyInput.value.trim();
+  if (!KEY_RE.test(valor)) {
+    showErr(d.keyErr, "Key inválida: use de 8 a 128 caracteres entre letras, números, - e _ (sem espaços).");
+    return;
+  }
+  const sim = await confirmar({
+    titulo: `Trocar a stream key de ${card.titulo.textContent}?`,
+    texto: "As próximas transmissões desta quadra vão para a key nova. Isso muda para onde o vídeo é enviado.",
+    ok: "Trocar key", perigo: true,
+  });
+  if (!sim) return;
+  try {
+    const r = await api(`/quadras/${card.id}/youtube/key`, "PUT", { stream_key: valor });
+    d.keyInput.value = ""; d.dirtyKey = false;
+    hideKey(card);
+    toast(r.status === "sem_mudanca" ? "Essa já era a key cadastrada." : "Stream key atualizada.", true);
+    await loadDestino(card);
+  } catch (e) {
+    showErr(d.keyErr, e.message);
+    throw e;
+  }
+}
+
+async function saveUrl(card, valor) {
+  const d = card.dest;
+  hideErr(d.urlErr);
+  if (!URL_RE.test(valor)) { showErr(d.urlErr, "Use o formato rtmp://servidor/aplicação (sem espaços)."); return; }
+  try {
+    const r = await api(`/quadras/${card.id}/youtube/url`, "PUT", { rtmp_url: valor });
+    d.dirtyUrl = false;
+    toast(r.status === "sem_mudanca" ? "Essa já era a URL em uso." : "URL RTMP atualizada.", true);
+    await loadDestino(card);
+  } catch (e) {
+    showErr(d.urlErr, e.message);
+    throw e;
+  }
+}
+
+async function resetUrl(card) {
+  const d = card.dest;
+  hideErr(d.urlErr);
+  const sim = await confirmar({
+    titulo: "Voltar à URL padrão do servidor?",
+    texto: "A quadra deixa de ter uma URL própria e passa a usar a do servidor.", ok: "Usar a padrão",
+  });
+  if (!sim) return;
+  try {
+    await api(`/quadras/${card.id}/youtube/url`, "PUT", { rtmp_url: null });
+    d.dirtyUrl = false;
+    toast("Voltou à URL padrão.", true);
+    await loadDestino(card);
+  } catch (e) {
+    showErr(d.urlErr, e.message);
+    throw e;
+  }
+}
+
+async function loadDestino(card) {
+  const d = card.dest;
+  try {
+    d.data = await api(`/quadras/${card.id}/youtube`);
+  } catch (e) {
+    d.keyTag.textContent = "erro ao carregar";
+    d.keyTag.className = "tag warn";
+    showErr(d.keyErr, e.message);
+    return;
+  }
+  renderDestino(card);
+}
+
+function nomeDaQuadra(id) {
+  const q = overview && overview.quadras.find((x) => x.quadra_id === id);
+  return q ? q.nome : id;
+}
+
+function renderDestino(card) {
+  const d = card.dest, data = d.data;
+  if (!data) return;
+  d.keyTag.textContent = data.tem_stream_key ? (data.stream_key_final ? `Cadastrada · termina em ${data.stream_key_final}` : "Cadastrada") : "Não cadastrada";
+  d.keyTag.className = `tag ${data.tem_stream_key ? "ok" : "warn"}`;
+  const outras = data.chave_compartilhada_com;
+  d.keyShared.hidden = outras.length === 0;
+  d.keyShared.textContent = outras.length ? `Esta key também é usada por ${outras.map(nomeDaQuadra).join(", ")}: só uma quadra por vez pode transmitir com ela.` : "";
+  if (!d.dirtyUrl && document.activeElement !== d.urlInput) d.urlInput.value = data.rtmp_url;
+  d.urlTag.textContent = data.rtmp_url_padrao ? "Padrão do servidor" : "Própria desta quadra";
+  d.urlTag.className = `tag ${data.rtmp_url_padrao ? "" : "ok"}`.trim();
+  d.hosts.textContent = `Só rtmp://. Hosts aceitos: ${data.rtmp_hosts_permitidos.join(", ")}.`;
+  setDisabled(d.btnUrlPadrao, data.rtmp_url_padrao || card.locked);
+  applyLock(card);
+}
+
+function applyLock(card) {
+  const d = card.dest, locked = Boolean(card.locked);
+  d.lock.hidden = !locked;
+  d.keyInput.readOnly = locked;
+  d.urlInput.readOnly = locked;
+  setDisabled(d.btnSaveKey, locked);
+  setDisabled(d.btnSaveUrl, locked);
+  setDisabled(d.btnUrlPadrao, locked || Boolean(d.data && d.data.rtmp_url_padrao));
+}
+
+// --- cartão: montagem e atualização -------------------------------------------------
+
+function buildTabs(card) {
+  const tabs = el("div", "tabs");
+  tabs.setAttribute("role", "tablist");
+  const make = (texto, ico) => {
+    const b = el("button", "tab");
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.append(icon(ico), document.createTextNode(texto));
+    return b;
+  };
+  card.tabTrans = make("Transmissão", "signal");
+  card.tabDest = make("Destino", "key");
+  card.tabTrans.addEventListener("click", () => selectTab(card, "trans"));
+  card.tabDest.addEventListener("click", () => selectTab(card, "dest"));
+  tabs.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
+      const alvo = card.aba === "trans" ? "dest" : "trans";
+      selectTab(card, alvo);
+      (alvo === "dest" ? card.tabDest : card.tabTrans).focus();
+    }
+  });
+  tabs.append(card.tabTrans, card.tabDest);
+  return tabs;
+}
+
+function selectTab(card, which) {
+  card.aba = which;
+  const dest = which === "dest";
+  card.tabTrans.setAttribute("aria-selected", String(!dest));
+  card.tabDest.setAttribute("aria-selected", String(dest));
+  card.tabTrans.tabIndex = dest ? -1 : 0;
+  card.tabDest.tabIndex = dest ? 0 : -1;
+  card.panTrans.hidden = dest;
+  card.panDest.hidden = !dest;
+  if (dest) loadDestino(card);
+}
+
+function buildCard(quadra) {
+  const q = quadra.quadra_id;
+  const card = { id: q, root: el("section", "card"), aba: "trans", avisosSig: "" };
+  const head = el("header", "card-head");
+  const titulo = el("div");
+  card.titulo = el("h2");
+  card.sub = el("div", "sub");
+  titulo.append(card.titulo, card.sub);
+  card.badge = el("span", "badge");
+  head.append(titulo, card.badge);
+
+  card.chips = el("div", "chips");
+  card.progress = el("div", "progress");
+  card.bar = el("div", "bar");
+  card.progress.append(card.bar);
+  card.avisos = el("div", "avisos");
+
+  card.panTrans = buildTransmissao(card);
+  card.panDest = buildDestino(card);
+  card.root.append(head, card.chips, card.progress, card.avisos, buildTabs(card), card.panTrans, card.panDest);
+  selectTabInicial(card);
   return card;
 }
 
+function selectTabInicial(card) {
+  card.tabTrans.setAttribute("aria-selected", "true");
+  card.tabDest.setAttribute("aria-selected", "false");
+  card.tabDest.tabIndex = -1;
+  card.panDest.hidden = true;
+}
+
 function applyPlacar(card, p) {
+  card.ultimoPlacar = p;
   card.setsa.textContent = p.placar.a.sets; card.pontosa.textContent = p.placar.a.pontos;
   card.setsb.textContent = p.placar.b.sets; card.pontosb.textContent = p.placar.b.pontos;
   card.nomea.textContent = p.nomes.a; card.nomeb.textContent = p.nomes.b;
-  card.volOut.textContent = `${p.volume}%`;
+  card.tita.textContent = p.nomes.a; card.titb.textContent = p.nomes.b;
+  if (!card.volEditando) {
+    card.volRange.value = Math.min(p.volume, VOLUME_MAX);   // o controle nunca passa do teto
+    card.volOut.textContent = `${p.volume}%`;               // mas o número mostra o valor real (a API pode ter posto mais)
+    card.volOut.title = p.volume > VOLUME_MAX ? `Acima do máximo do painel (${VOLUME_MAX}%): use − ou o controle para reduzir` : "";
+  }
+  setDisabled(card.btnVolMais, p.volume >= VOLUME_MAX);
+  card.volIcon.replaceChildren(icon(p.audio_da_camera === false ? "mute" : "volume"));
   if (document.activeElement !== card.edA) card.edA.value = p.nomes.a;
   if (document.activeElement !== card.edB) card.edB.value = p.nomes.b;
 }
@@ -227,71 +695,147 @@ function setBadge(card, text, cls) {
   card.badge.className = `badge ${cls || ""}`.trim();
 }
 
+function chip(ico, text, cls) {
+  const c = el("span", `chip ${cls || ""}`.trim());
+  c.append(icon(ico), document.createTextNode(text));
+  return c;
+}
+
+function renderAvisos(card, avisos) {
+  const sig = JSON.stringify(avisos.map((a) => [a.tipo, a.msg, a.acao ? a.acao.label : ""]));
+  if (sig === card.avisosSig) return;   // só refaz o DOM quando muda: evita roubar o clique de um botão de aviso
+  card.avisosSig = sig;
+  card.avisos.replaceChildren(...avisos.map((a) => {
+    const p = el("p", a.tipo === "erro" ? "aviso erro-aviso" : "aviso");
+    p.append(icon("alert"), el("span", "", a.msg));
+    if (a.acao) p.append(button(a.acao.label, "secondary small", a.acao.fn));
+    return p;
+  }));
+  card.avisos.hidden = avisos.length === 0;
+}
+
 function updateCard(card, q) {
-  const p = q.placar, d = q.direta;
+  const p = q.placar, d = q.direta, modo = q.modo;
   card.titulo.textContent = q.nome;
-  const modo = q.modo;
+  card.sub.textContent = `${q.esporte ? q.esporte + " · " : ""}${q.quadra_id}`;
+  const noAr = modo === "placar" || modo === "direta" || modo === "conflito";
+  card.locked = noAr;
+  card.root.classList.toggle("no-ar", noAr);
+  card.root.classList.toggle("conflito", modo === "conflito");
   card.secOff.hidden = !(modo === "nenhum" || modo === "desconhecido");
   card.secPlacar.hidden = !(modo === "placar" || modo === "conflito");
   card.secDireta.hidden = !(modo === "direta" || modo === "conflito");
   const avisos = [];
+  const chips = [];
+  let pct = null, nivel = "";
 
   if (modo === "placar" || modo === "conflito") {
     applyPlacar(card, p);
-    const partes = [`no ar há ${fmtDuration(p.no_ar_ha_segundos)}`];
-    if (p.encerra_em_segundos != null) partes.push(`encerra em ${fmtDuration(p.encerra_em_segundos)}`);
-    partes.push(p.audio_da_camera === false ? "câmera sem áudio (vai silêncio)" : "áudio da câmera");
-    card.info.textContent = partes.join(" · ");
+    chips.push(chip("clock", `no ar há ${fmtDuration(p.no_ar_ha_segundos)}`));
+    if (p.encerra_em_segundos != null) {
+      const cls = p.encerra_em_segundos < 120 ? "danger" : p.encerra_em_segundos < 600 ? "warn" : "";
+      chips.push(chip("clock", `encerra em ${fmtDuration(p.encerra_em_segundos)}`, cls));
+      const total = (p.no_ar_ha_segundos || 0) + p.encerra_em_segundos;
+      if (total > 0) pct = Math.min(100, ((p.no_ar_ha_segundos || 0) / total) * 100);
+      nivel = cls;
+    }
+    chips.push(p.audio_da_camera === false ? chip("mute", "câmera sem áudio (vai silêncio)", "warn") : chip("volume", "áudio da câmera"));
+    if (p.reinicios) chips.push(chip("alert", `${p.reinicios} reinício(s)`, "warn"));
     if (p.transmitindo) setBadge(card, "AO VIVO · placar", "live");
     else setBadge(card, "Conectando…", "connecting");
-    if (!p.transmitindo) avisos.push(`O ffmpeg não está enviando imagem agora (reinícios: ${p.reinicios}). Se persistir, confira a câmera e a stream key.`);
-    if (p.travamentos) avisos.push(`Já travou e foi reiniciado ${p.travamentos}×.`);
+    if (!p.transmitindo) avisos.push({ tipo: "aviso", msg: `O ffmpeg não está enviando imagem agora (reinícios: ${p.reinicios}). Se persistir, confira a câmera e a stream key.` });
+    if (p.travamentos) avisos.push({ tipo: "aviso", msg: `Já travou e foi reiniciado ${p.travamentos}×.` });
   } else if (modo === "direta") {
     setBadge(card, "AO VIVO · direta", "live");
-    card.info.textContent = "A câmera envia direto ao YouTube (sem placar).";
+    chips.push(chip("signal", "a câmera envia direto ao YouTube, sem placar"));
   } else if (modo === "desconhecido") {
     setBadge(card, "Câmera sem resposta", "connecting");
-    card.info.textContent = "";
-    avisos.push(`Não consegui falar com a câmera${d.erro ? `: ${d.erro}` : "."}`);
+    avisos.push({ tipo: "erro", msg: `Não consegui falar com a câmera${d.erro ? `: ${d.erro}` : "."}` });
   } else {
     setBadge(card, "Fora do ar", "");
-    card.info.textContent = "";
   }
   if (modo === "conflito") {
     setBadge(card, "CONFLITO", "conflict");
-    avisos.push("Transmissão com placar e live direta ligadas ao mesmo tempo (mesma stream key). Encerre uma das duas.");
+    avisos.push({ tipo: "erro", msg: "Transmissão com placar e live direta ligadas ao mesmo tempo (mesma stream key). Encerre uma das duas." });
   }
 
   const emUso = q.chave_em_uso_por && !p.no_ar && modo !== "direta" ? q.chave_em_uso_por : null;
   if (emUso) {
-    const outra = overview.quadras.find((x) => x.quadra_id === emUso);
-    avisos.push(`A stream key é a mesma de ${outra ? outra.nome : emUso}, que está no ar. Encerre-a antes de iniciar aqui.`);
+    avisos.push({ tipo: "aviso", msg: `A stream key é a mesma de ${nomeDaQuadra(emUso)}, que está no ar. Encerre-a antes de iniciar aqui.` });
   } else if (q.chave_compartilhada_com.length && (modo === "nenhum" || modo === "desconhecido")) {
-    const nomes = q.chave_compartilhada_com.map((id) => (overview.quadras.find((x) => x.quadra_id === id) || { nome: id }).nome);
-    card.info.textContent = `Compartilha a stream key com ${nomes.join(", ")}: só uma por vez.`;
+    chips.push(chip("key", `key compartilhada com ${q.chave_compartilhada_com.map(nomeDaQuadra).join(", ")}: só uma por vez`));
   }
   const semChave = !q.tem_stream_key;
-  if (semChave) avisos.push("Esta quadra não tem youtube_stream_key em cameras.json.");
+  if (semChave) {
+    avisos.push({
+      tipo: "aviso", msg: "Esta quadra ainda não tem stream key.",
+      acao: { label: "Cadastrar key", fn: async () => { selectTab(card, "dest"); card.dest.keyInput.focus(); } },
+    });
+  }
   const cheio = overview.transmissoes_com_placar.no_ar >= overview.transmissoes_com_placar.limite && !p.no_ar;
-  if (cheio && !semChave) avisos.push("Limite de transmissões com placar atingido; encerre outra para iniciar aqui.");
-  card.btnPlacar.disabled = semChave || cheio || Boolean(emUso);
-  card.btnDireta.disabled = semChave || Boolean(emUso);
-  card.aviso.hidden = avisos.length === 0;
-  card.aviso.textContent = avisos.join(" ");
+  if (cheio && !semChave) avisos.push({ tipo: "aviso", msg: "Limite de transmissões com placar atingido; encerre outra para iniciar aqui." });
+  setDisabled(card.btnPlacar, semChave || cheio || Boolean(emUso));
+  setDisabled(card.btnDireta, semChave || Boolean(emUso));
+
+  card.chips.replaceChildren(...chips);
+  card.chips.hidden = chips.length === 0;
+  card.progress.hidden = pct == null;
+  if (pct != null) {
+    card.bar.style.width = `${pct.toFixed(1)}%`;   // CSSOM, não o atributo style: a CSP permite
+    card.progress.className = `progress ${nivel}`.trim();
+  }
+  renderAvisos(card, avisos);
+  applyLock(card);
 }
 
-// --- laço principal ---------------------------------------------------------
+// --- topo e laço principal ----------------------------------------------------------
+
+function pill(ico, rotulo, valor, cls) {
+  const s = el("span", `pill ${cls || ""}`.trim());
+  s.append(icon(ico), document.createTextNode(`${rotulo} `), el("b", "", String(valor)));
+  return s;
+}
+
+function renderTopo(data) {
+  const aoVivo = data.quadras.filter((q) => ["placar", "direta", "conflito"].includes(q.modo)).length;
+  const lim = data.transmissoes_com_placar;
+  $("#pills").replaceChildren(
+    pill("signal", "Ao vivo", aoVivo, aoVivo > 0 ? "live" : ""),
+    pill("grid", "Com placar", `${lim.no_ar}/${lim.limite}`),
+    pill("grid", "Quadras", data.quadras.length),
+  );
+  document.title = `${aoVivo ? `(${aoVivo} ao vivo) ` : ""}rePET · Painel de transmissão`;
+}
+
+function pintarConexao() {
+  const box = $("#conexao");
+  const t = $("#conexao-txt");
+  if (!lastOk) { box.classList.remove("off"); t.textContent = "conectando…"; return; }
+  const s = Math.max(0, Math.round((Date.now() - lastOk) / 1000));
+  box.classList.toggle("off", falhando);
+  t.textContent = falhando ? `sem conexão (último dado há ${s} s)` : s < 3 ? "atualizado agora" : `atualizado há ${s} s`;
+}
+setInterval(pintarConexao, 1000);
 
 async function refresh() {
   let data;
   try { data = await api("/status"); } catch (e) {
-    if (!$("#app").hidden) { $("#aviso-geral").textContent = `Sem conexão com a API: ${e.message}`; $("#aviso-geral").hidden = false; }
+    falhando = true;
+    pintarConexao();
+    if (!$("#app").hidden) {
+      $("#aviso-geral").textContent = `Sem conexão com a API: ${e.message} Mostrando o último estado conhecido.`;
+      $("#aviso-geral").hidden = false;
+    }
     return;
   }
+  if ($("#app").hidden) return;   // saiu/expirou enquanto a resposta vinha: não recria nada por cima do login
+  falhando = false;
+  lastOk = Date.now();
+  pintarConexao();
   $("#aviso-geral").hidden = true;
   overview = data;
-  const lim = data.transmissoes_com_placar;
-  $("#resumo").textContent = `Transmissões com placar: ${lim.no_ar}/${lim.limite}`;
+  renderTopo(data);
+  $("#vazio").hidden = data.quadras.length > 0;
   const container = $("#quadras");
   const ordenadas = [...data.quadras].sort((x, y) => x.nome.localeCompare(y.nome, "pt-BR", { numeric: true }));
   ordenadas.forEach((q, i) => {

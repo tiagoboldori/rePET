@@ -82,11 +82,14 @@ def check_access(request: Request) -> None:
             raise HTTPException(status_code=503, detail="LIVE_API_KEY não configurada.")
         if not _equal(x_live_key, config.LIVE_API_KEY):
             raise HTTPException(status_code=401, detail="Chave inválida.", headers=_BEARER_CHALLENGE)
+        request.state.token_owner = "x_live_key"
         return
 
-    if panel.verify_token(request.cookies.get(panel.COOKIE)):
+    user = panel.verify_token(request.cookies.get(panel.COOKIE))
+    if user:
         if request.method not in ("GET", "HEAD") and request.headers.get("x-painel") != "1":
             raise HTTPException(status_code=403, detail="Falta o header X-Painel.")
+        request.state.token_owner = f"painel:{user}"  # quem é o operador, para a auditoria
         return
 
     if not accepted_tokens() and not panel.configured():
