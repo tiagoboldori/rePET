@@ -361,7 +361,7 @@ trate `detail` lista como erro técnico.
    autenticação de usuário existente.
 3. A tela do painel, com os requisitos de interface.
 4. Testes (com a API simulada) e a documentação curta de configuração: variáveis
-   `REPET_API_URL` e `REPET_API_TOKEN`, e qual dos dois tokens aceitos foi usado.
+   `REPET_API_URL` e `REPET_API_TOKEN`, e qual dos tokens aceitos foi usado.
 5. No fim, um resumo do que foi feito, do que não foi e das decisões que dependem de mim.
 
 Comece explorando o projeto e me diga o plano em poucas linhas antes de implementar.
