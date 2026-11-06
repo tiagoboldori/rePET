@@ -19,6 +19,12 @@ A documentação interativa (Swagger) é gerada pelo FastAPI em
 | `POST /live/{quadra_id}` | `X-Live-Key` | Liga a live no YouTube |
 | `POST /live/{quadra_id}/stop` ou `DELETE /live/{quadra_id}` | `X-Live-Key` | Desliga a live |
 | `GET /live/{quadra_id}` | `X-Live-Key` | Diz se a live está no ar |
+| `POST /broadcast/{quadra_id}/start` | `X-Live-Key` | Liga a transmissão **com placar** (até 2 ao mesmo tempo) |
+| `POST /broadcast/{quadra_id}/stop` ou `DELETE /broadcast/{quadra_id}` | `X-Live-Key` | Encerra a transmissão com placar |
+| `POST /broadcast/{quadra_id}/ponto/{a\|b}` | `X-Live-Key` | +1 ponto (`?delta=-1` corrige) |
+| `POST /broadcast/{quadra_id}/set/{a\|b}` | `X-Live-Key` | +1 set e zera os pontos |
+| `POST /broadcast/{quadra_id}/volume/{up\|down}` | `X-Live-Key` | Sobe/desce o volume com a live no ar |
+| `GET /broadcast`, `GET /broadcast/{quadra_id}` | `X-Live-Key` | Estado (placar, nomes, volume, tempo no ar) |
 | `GET /api/replays/{replay_id}` | nenhuma | Metadados de um replay |
 | `GET /api/replays/{replay_id}/media` | nenhuma | Baixa/assiste o vídeo do replay |
 | `GET /api/quadras/{quadra_id}/replays` | nenhuma | Lista paginada de replays da quadra |
@@ -147,6 +153,104 @@ Observações:
 - A câmera manda o stream principal (1080p H.264) com o áudio dela (AAC mono
   16 kHz). Se o áudio da câmera estiver desligado, a live sai sem trilha de
   áudio.
+
+---
+
+## Transmissão com placar (`/broadcast`)
+
+Diferente da live direta acima, aqui o **servidor reencoda o vídeo**: um ffmpeg
+por quadra lê a câmera, desenha o placar por cima e empurra o RTMP ao YouTube.
+Use a live direta (`/live`) quando não precisar de placar; ela não gasta CPU.
+
+- **Custo medido** (câmeras reais, 1080p, x264 `ultrafast`): ~1 a 1,5 núcleo e
+  ~0,4 a 0,7 GB de RAM por transmissão. Limite de **2 ao mesmo tempo**
+  (`BROADCAST_MAX_CONCURRENT`); a terceira recebe `409`.
+- Todas as câmeras saem em **1080p** (a quadra2 entrega 1440p e é reduzida).
+- Atraso da imagem: alguns segundos a mais que a live direta (reencode).
+- Mesma chave `X-Live-Key` e mesmo prazo `LIVE_MAX_SECONDS` da live direta.
+- Uma quadra não pode estar nos dois modos: ligar um com o outro no ar dá `409`.
+- **Sobrevive a reinício da API** (o ffmpeg roda destacado e é readotado), e se o
+  ffmpeg cair, a API o relança sozinha (campo `reinicios`).
+
+Lados são sempre `a` e `b`. O placar é simples: pontos e sets, números inteiros.
+
+### Ligar e desligar
+
+```bash
+# jogo novo (placar 0x0, volume 100%); o corpo é opcional
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
+  -H "X-Live-Key: SUA_LIVE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"}'
+
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/stop -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+Corpo do `start` (todos opcionais): `nome_a`, `nome_b` (até 14 caracteres,
+maiúsculas), `reset` (padrão `true`: placar 0x0 **e volume 100%**; com `false`
+mantém placar e volume, útil para religar o mesmo jogo) e `volume` (% do da câmera).
+É idempotente: já no ar devolve `"status": "ja_no_ar"`.
+
+### Placar
+
+```bash
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a -H "X-Live-Key: ..."
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/b -H "X-Live-Key: ..."
+curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a?delta=-1" -H "X-Live-Key: ..."  # corrige
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a -H "X-Live-Key: ..."   # +1 set e zera os pontos dos DOIS lados
+curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a?delta=-1" -H "X-Live-Key: ..."  # só tira 1 set
+curl -X PUT  http://SERVIDOR:8000/broadcast/loc1-quadra1/placar -H "X-Live-Key: ..." \
+  -H "Content-Type: application/json" -d '{"pontos_a": 40, "pontos_b": 15, "sets_a": 1}'  # correção manual
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/placar/zerar -H "X-Live-Key: ..."
+curl -X PUT  http://SERVIDOR:8000/broadcast/loc1-quadra1/nomes -H "X-Live-Key: ..." \
+  -H "Content-Type: application/json" -d '{"nome_a": "Ana e Bia"}'
+```
+
+O placar aparece no vídeo em menos de 1 s depois da chamada, e pode ser
+ajustado antes de ligar. Pontos e sets nunca ficam negativos.
+
+### Volume
+
+```bash
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/up   -H "X-Live-Key: ..."   # +10 pontos percentuais
+curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/down?passo=20" -H "X-Live-Key: ..."
+curl -X PUT  http://SERVIDOR:8000/broadcast/loc1-quadra1/volume -H "X-Live-Key: ..." \
+  -H "Content-Type: application/json" -d '{"nivel": 150}'
+```
+
+`nivel` é % do volume da câmera (100 = original, 0 = mudo, máximo
+`BROADCAST_VOLUME_MAX`=400). Vale na hora, sem derrubar a live. Há um limitador
+de pico, então subir demais satura com menos distorção, mas não perfeito: o
+microfone da câmera já chega perto de 0 dBFS em jogo.
+
+### Resposta (todas as rotas devolvem o estado)
+
+```json
+{
+  "quadra_id": "loc1-quadra1", "no_ar": true,
+  "nomes": {"a": "ANA E BIA", "b": "CRIS E DUDA"},
+  "placar": {"a": {"pontos": 2, "sets": 1}, "b": {"pontos": 1, "sets": 0}},
+  "volume": 100, "no_ar_ha_segundos": 312, "encerra_em_segundos": 6888, "reinicios": 0,
+  "audio_da_camera": true
+}
+```
+
+| Código | Quando |
+|---|---|
+| `401` / `503` | Chave ausente/errada / `LIVE_API_KEY` não configurada |
+| `404` | `quadra_id` não está em `config/cameras.json` |
+| `409` | Limite de 2 transmissões, ou a quadra está em live direta (e vice-versa) |
+| `422` | Lado diferente de `a`/`b`, ou a quadra sem `youtube_stream_key` |
+| `502` | A câmera não respondeu ao checar a live direta |
+| `503` | O ffmpeg não estava lendo comandos (reiniciando); tente de novo |
+
+Log do ffmpeg de cada quadra: `logs/broadcast_{quadra_id}.log`.
+
+**Áudio.** A cada início (e a cada relançamento) a API sonda a câmera. Se ela
+estiver **sem trilha de áudio**, a transmissão sobe com uma trilha de silêncio em
+vez de falhar, e a resposta traz `"audio_da_camera": false` (com `true` a live usa
+o som da câmera; `null` = ainda não sondado ou transmissão readotada após reinício
+da API). O volume só tem efeito quando há áudio da câmera. Dica: um volume 0 deixa
+a live muda; `start` com `reset=true` (padrão) volta o volume a 100%.
 
 ---
 

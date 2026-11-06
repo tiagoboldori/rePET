@@ -164,14 +164,26 @@ Público (sem autenticação):
 | `GET /live/{quadra_id}` | `{no_ar: bool}`, lido direto da câmera (`enabled` do `/ISAPI/Custom/RTMP`). `502` se a câmera não responde |
 | `POST /live/{quadra_id}` | Liga a live: configura a **câmera** (ISAPI) para empurrar o RTMP direto ao YouTube, sem passar pelo servidor. Stream key em `youtube_stream_key` no `cameras.json`. Idempotente; a API desliga a câmera após `LIVE_MAX_SECONDS`. `503` sem `LIVE_API_KEY`, `401` chave errada, `422` sem stream key, `502` câmera/DNS com problema |
 | `DELETE /live/{quadra_id}` ou `POST /live/{quadra_id}/stop` | Desliga a live (o `POST` é para quem só consegue fazer POST) |
+| `POST /broadcast/{quadra_id}/start` / `.../stop` | Liga/encerra a transmissão **com placar** (o servidor reencoda e desenha o overlay). Até 2 ao mesmo tempo (`409` na 3ª); `409` também se a quadra estiver em live direta |
+| `POST /broadcast/{quadra_id}/ponto/{a\|b}` · `.../set/{a\|b}` | +1 ponto (`?delta=-1` corrige) · +1 set e zera os pontos dos dois lados |
+| `POST /broadcast/{quadra_id}/volume/{up\|down}` · `PUT .../volume` | Volume ao vivo, em % do da câmera (100 = original) |
+| `GET /broadcast`, `GET /broadcast/{quadra_id}`, `PUT .../placar`, `PUT .../nomes`, `POST .../placar/zerar` | Estado e correções manuais |
 
 A live é da câmera (Hikvision, vídeo 1080p H.264 do stream principal + áudio AAC
 mono 16 kHz): sobrevive a reinício da API, a câmera reconecta sozinha se o RTMP
 cair, e o prazo fica em `LIVE_STATE_FILE` para ser reassumido na subida. As
 câmeras estão **sem DNS**, então a URL leva o IP do ingest (resolvido pela API
 a cada `POST`); ao desligar, a URL é trocada por um placeholder, o que também
-apaga a stream key da câmera. Sem overlay: placar ou qualquer arte por cima
-exige voltar a passar o vídeo por um ffmpeg no servidor.
+apaga a stream key da câmera. Essa live direta não tem overlay.
+
+Para placar, use `/broadcast`: um ffmpeg por quadra lê o RTSP, reduz tudo a 1080p
+(a quadra2 entrega 1440p), desenha nomes/sets/pontos por cima e empurra o RTMP ao
+YouTube. Custo medido: ~1 a 1,5 núcleo e ~0,4 a 0,7 GB por transmissão (limite de
+2 simultâneas). O ffmpeg roda destacado: reiniciar só a API não o derruba (o
+`resume()` o readota) e, se ele cair, a API o relança. **Atenção:** `systemctl
+restart repet` (`KillMode=control-group`; o serviço costuma reiniciar por volta das 06:00) mata o cgroup inteiro e
+derruba a transmissão; já a live direta, que é da câmera, sobrevive. Detalhes e
+exemplos em [`docs/API.md`](docs/API.md).
 
 Protegido por HTTP Basic (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, sem default —
 sem configurar, responde `401` sempre):
@@ -207,6 +219,8 @@ Configuração persistente: `cp .env.example .env`, preencher e rodar
 | `LIVE_API_KEY` | vazio | Chave do `/live/*` (header `X-Live-Key`); vazio = `503` |
 | `LIVE_MAX_SECONDS` | `7200` | Desliga a live na câmera depois desse tempo; `0` = sem limite |
 | `LIVE_STATE_FILE` | `.data/live_state.json` | Prazos das lives ligadas (reassumidos quando a API sobe) |
+| `BROADCAST_MAX_CONCURRENT` / `BROADCAST_PRESET` / `BROADCAST_BITRATE` / `BROADCAST_THREADS` | `2` / `ultrafast` / `4500k` / `4` | Transmissão com placar: simultâneas, preset x264, bitrate e núcleos por transmissão |
+| `BROADCAST_VOLUME_STEP` / `BROADCAST_VOLUME_MAX` | `10` / `400` | Passo do `volume/up\|down` e teto, em % |
 | `YOUTUBE_RTMP_URL` | `rtmp://a.rtmp.youtube.com/live2` | Ingest do YouTube |
 | `BUFFER_ROOT` | `/var/replay` | Segmentos brutos (`<BUFFER_ROOT>/<quadra_id>/seg_*.mp4`) |
 | `OUTPUT_DIR` | `/var/replay/output` | Clipes finais (`<quadra_id>_<timestamp>.mp4`, mais variantes `_oriented`/`_overlay`) |

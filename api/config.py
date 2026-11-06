@@ -109,6 +109,24 @@ LIVE_STATE_FILE = Path(
     os.environ.get("LIVE_STATE_FILE", str(Path(__file__).resolve().parent.parent / ".data" / "live_state.json"))
 )
 
+# --- Transmissão com placar (/broadcast/{quadra_id}) -------------------------
+# O servidor reencoda (x264) e desenha o overlay; usa a mesma LIVE_API_KEY e o
+# mesmo LIVE_MAX_SECONDS da live direta. Custo medido: ~1 núcleo por transmissão
+# em ultrafast (~1,5 em veryfast). BROADCAST_THREADS limita os núcleos por transmissão.
+_ROOT = Path(__file__).resolve().parent.parent
+BROADCAST_MAX_CONCURRENT = int(os.environ.get("BROADCAST_MAX_CONCURRENT", "2"))
+BROADCAST_PRESET = os.environ.get("BROADCAST_PRESET", "ultrafast")
+BROADCAST_BITRATE = os.environ.get("BROADCAST_BITRATE", "4500k")  # sempre "<n>k"
+BROADCAST_THREADS = int(os.environ.get("BROADCAST_THREADS", "4"))
+BROADCAST_FONT = os.environ.get("BROADCAST_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+BROADCAST_VOLUME_STEP = int(os.environ.get("BROADCAST_VOLUME_STEP", "10"))  # % por clique
+BROADCAST_VOLUME_MAX = int(os.environ.get("BROADCAST_VOLUME_MAX", "400"))  # % do original
+BROADCAST_DIR = Path(os.environ.get("BROADCAST_DIR", str(_ROOT / ".data" / "broadcast")))
+BROADCAST_STATE_FILE = Path(
+    os.environ.get("BROADCAST_STATE_FILE", str(_ROOT / ".data" / "broadcast_state.json"))
+)
+BROADCAST_LOG_DIR = Path(os.environ.get("BROADCAST_LOG_DIR", str(_ROOT / "logs")))
+
 
 def load_cameras() -> dict[str, dict]:
     """Carrega config/cameras.json, indexado por quadra_id."""

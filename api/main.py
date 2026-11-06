@@ -6,6 +6,9 @@ POST /replay/{quadra_id} é chamado direto pelo firmware do botão físico
 POST/DELETE /live/{quadra_id} liga/desliga o RTMP que a própria câmera
 empurra para o YouTube (via ISAPI); GET /live/{quadra_id} diz se está no ar. Exigem o header X-Live-Key (LIVE_API_KEY).
 
+/broadcast/{quadra_id}/... é a transmissão COM placar (o servidor reencoda e desenha
+o overlay): iniciar/encerrar, pontos, sets, nomes e volume. Mesmo header X-Live-Key.
+
 Dev: uvicorn api.main:app --reload --port 8000
 """
 import secrets
@@ -14,13 +17,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from api import config, live
+from api import broadcast, config, live
 from clipper.clip_generator import (
     ClipGenerationError,
     generate_clip,
@@ -42,8 +46,10 @@ async def lifespan(app: FastAPI):
         if recuperados:
             print(f"[api] reconciliação: {recuperados} replay(s) recuperado(s) do disco.")
     live.resume(config.load_cameras())
+    broadcast.resume(config.load_cameras())
     yield
     live.cancel_timers()
+    broadcast.detach()  # os ffmpeg das transmissões seguem no ar; resume() os readota
 
 
 app = FastAPI(title="Replay System — backend central", lifespan=lifespan)
@@ -115,6 +121,11 @@ def start_live(quadra_id: str):
             status_code=422,
             detail=f"'{quadra_id}' não tem youtube_stream_key em {config.CAMERAS_FILE}.",
         )
+    if broadcast.is_on_air(quadra_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{quadra_id}' está em transmissão com placar; encerre-a antes (POST /broadcast/{quadra_id}/stop).",
+        )
     try:
         started = live.start(quadra_id, camera["input_url"], stream_key)
     except live.LiveError as exc:
@@ -136,6 +147,123 @@ def stop_live(quadra_id: str):
     except live.LiveError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"quadra_id": quadra_id, "status": "encerrada" if stopped else "nao_estava_no_ar"}
+
+
+# --- Transmissão com placar --------------------------------------------------
+
+class BroadcastStart(BaseModel):
+    nome_a: str | None = None
+    nome_b: str | None = None
+    reset: bool = True  # jogo novo: placar 0x0 e volume 100% (o relançamento interno nunca zera)
+    volume: int | None = None  # % do volume da câmera; vazio = o de `reset` (ou o último, se reset=false)
+
+
+class BroadcastNames(BaseModel):
+    nome_a: str | None = None
+    nome_b: str | None = None
+
+
+class BroadcastScore(BaseModel):
+    pontos_a: int | None = None
+    pontos_b: int | None = None
+    sets_a: int | None = None
+    sets_b: int | None = None
+
+
+class BroadcastVolume(BaseModel):
+    nivel: int  # % do volume da câmera (100 = original)
+
+
+def _bc(quadra_id: str, call, *args):
+    """Chama o módulo broadcast para uma quadra existente, traduzindo os erros."""
+    _live_camera(quadra_id)
+    try:
+        return call(quadra_id, *args)
+    except broadcast.BroadcastError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.get("/broadcast", dependencies=[Depends(require_live_key)])
+def broadcast_list():
+    """Todas as transmissões com placar (e o limite simultâneo)."""
+    return broadcast.list_all()
+
+
+@app.get("/broadcast/{quadra_id}", dependencies=[Depends(require_live_key)])
+def broadcast_status(quadra_id: str):
+    return _bc(quadra_id, broadcast.snapshot)
+
+
+@app.post("/broadcast/{quadra_id}/start", dependencies=[Depends(require_live_key)])
+def broadcast_start(quadra_id: str, body: BroadcastStart | None = None):
+    """Liga a transmissão com placar (idempotente). Corpo opcional: nomes e reset."""
+    camera = _live_camera(quadra_id)
+    body = body or BroadcastStart()
+    if not broadcast.is_on_air(quadra_id):
+        try:
+            direct = live.status(camera["input_url"])
+        except live.LiveError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if direct:
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{quadra_id}' está em live direta; encerre-a antes (POST /live/{quadra_id}/stop).",
+            )
+    try:
+        started = broadcast.start(
+            quadra_id, camera, {"a": body.nome_a, "b": body.nome_b}, body.reset, body.volume
+        )
+    except broadcast.BroadcastError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return {"status": "iniciada" if started else "ja_no_ar", **broadcast.snapshot(quadra_id)}
+
+
+@app.post("/broadcast/{quadra_id}/stop", dependencies=[Depends(require_live_key)])
+@app.delete("/broadcast/{quadra_id}", dependencies=[Depends(require_live_key)])
+def broadcast_stop(quadra_id: str):
+    stopped = _bc(quadra_id, broadcast.stop)
+    return {"status": "encerrada" if stopped else "nao_estava_no_ar", **broadcast.snapshot(quadra_id)}
+
+
+@app.post("/broadcast/{quadra_id}/ponto/{lado}", dependencies=[Depends(require_live_key)])
+def broadcast_point(quadra_id: str, lado: str, delta: int = 1):
+    """+1 ponto no lado 'a' ou 'b' (delta=-1 corrige um erro)."""
+    return _bc(quadra_id, broadcast.add_point, lado, delta)
+
+
+@app.post("/broadcast/{quadra_id}/set/{lado}", dependencies=[Depends(require_live_key)])
+def broadcast_set(quadra_id: str, lado: str, delta: int = 1):
+    """+1 set no lado e zera os pontos dos dois (delta=-1 só tira um set)."""
+    return _bc(quadra_id, broadcast.add_set, lado, delta)
+
+
+@app.put("/broadcast/{quadra_id}/placar", dependencies=[Depends(require_live_key)])
+def broadcast_score(quadra_id: str, body: BroadcastScore):
+    """Correção manual: grava exatamente os valores enviados."""
+    return _bc(quadra_id, broadcast.set_score, body.model_dump())
+
+
+@app.post("/broadcast/{quadra_id}/placar/zerar", dependencies=[Depends(require_live_key)])
+def broadcast_reset_score(quadra_id: str):
+    return _bc(quadra_id, broadcast.reset_score)
+
+
+@app.put("/broadcast/{quadra_id}/nomes", dependencies=[Depends(require_live_key)])
+def broadcast_names(quadra_id: str, body: BroadcastNames):
+    return _bc(quadra_id, broadcast.set_names, body.nome_a, body.nome_b)
+
+
+@app.post("/broadcast/{quadra_id}/volume/{direcao}", dependencies=[Depends(require_live_key)])
+def broadcast_volume_step(quadra_id: str, direcao: str, passo: int | None = None):
+    """direcao = 'up' ou 'down'; passo em % (padrão BROADCAST_VOLUME_STEP)."""
+    if direcao not in ("up", "down"):
+        raise HTTPException(status_code=422, detail="direcao deve ser 'up' ou 'down'.")
+    return _bc(quadra_id, broadcast.change_volume, 1 if direcao == "up" else -1, passo)
+
+
+@app.put("/broadcast/{quadra_id}/volume", dependencies=[Depends(require_live_key)])
+def broadcast_volume(quadra_id: str, body: BroadcastVolume):
+    return _bc(quadra_id, broadcast.set_volume, body.nivel)
 
 
 def _serialize_replay(replay: Replay) -> dict:
