@@ -1,15 +1,34 @@
 # API do rePET
 
-Referência de todas as rotas, com exemplos de `curl`. A API é FastAPI e sobe na
-porta `8000` (`uvicorn api.main:app --port 8000`). Nos exemplos:
+Referência de todas as rotas, com exemplos de requisição (`curl`), corpo e
+resposta. A API é FastAPI e sobe na porta `8000`
+(`uvicorn api.main:app --port 8000`).
+
+A documentação interativa (Swagger), gerada pelo FastAPI, fica em
+`http://SERVIDOR:8000/docs`.
+
+## Convenções dos exemplos
 
 - `SERVIDOR` = host/IP da máquina da API (`http://SERVIDOR:8000`);
 - `loc1-quadra1` = um `quadra_id` de `config/cameras.json`;
 - `SUA_LIVE_API_KEY`, `SEU_USUARIO`, `SUA_SENHA` = valores do seu `.env`
-  (**nunca** coloque credencial real em arquivo versionado).
+  (**nunca** coloque credencial real em arquivo versionado);
+- os valores nas respostas (tempos, ids, tamanhos) são ilustrativos.
 
-A documentação interativa (Swagger) é gerada pelo FastAPI em
-`http://SERVIDOR:8000/docs`.
+## Índice
+
+- [Resumo das rotas](#resumo)
+- [Autenticação](#autenticação)
+- [Formato dos erros](#formato-dos-erros)
+- [Gravar replay](#gravar-replay)
+- [Subir a live no YouTube](#subir-a-live-no-youtube)
+- [Transmissão com placar](#transmissão-com-placar-broadcast)
+- [Estado geral](#estado-geral-get-status)
+- [Painel web](#painel-web)
+- [Consultar replays](#consultar-replays)
+- [Apagar um replay](#apagar-um-replay)
+- [Healthcheck](#healthcheck)
+- [Exemplo de ponta a ponta: um jogo](#exemplo-de-ponta-a-ponta-um-jogo)
 
 ## Resumo
 
@@ -23,7 +42,11 @@ A documentação interativa (Swagger) é gerada pelo FastAPI em
 | `POST /broadcast/{quadra_id}/stop` ou `DELETE /broadcast/{quadra_id}` | `X-Live-Key` | Encerra a transmissão com placar |
 | `POST /broadcast/{quadra_id}/ponto/{a\|b}` | `X-Live-Key` | +1 ponto (`?delta=-1` corrige) |
 | `POST /broadcast/{quadra_id}/set/{a\|b}` | `X-Live-Key` | +1 set e zera os pontos |
+| `PUT /broadcast/{quadra_id}/placar` | `X-Live-Key` | Correção manual do placar |
+| `POST /broadcast/{quadra_id}/placar/zerar` | `X-Live-Key` | Zera pontos e sets |
+| `PUT /broadcast/{quadra_id}/nomes` | `X-Live-Key` | Troca os nomes das duplas |
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` | `X-Live-Key` | Sobe/desce o volume com a live no ar |
+| `PUT /broadcast/{quadra_id}/volume` | `X-Live-Key` | Define o volume |
 | `GET /broadcast`, `GET /broadcast/{quadra_id}` | `X-Live-Key` | Estado (placar, nomes, volume, tempo no ar) |
 | `GET /status` | `X-Live-Key` ou sessão do painel | Uma linha por quadra com os dois modos (direta e placar) |
 | `GET /painel` | página pública; login dentro | Painel web de controle da transmissão (porta 8000, a mesma da API) |
@@ -36,7 +59,70 @@ A documentação interativa (Swagger) é gerada pelo FastAPI em
 | `GET /quadra/{quadra_id}` | nenhuma | Página HTML de teste com os replays |
 | `GET /health` | nenhuma | Healthcheck |
 
-Erros vêm no formato `{"detail": "mensagem"}`.
+---
+
+## Autenticação
+
+São três mecanismos, conforme a rota:
+
+| Mecanismo | Onde se usa | Como enviar |
+|---|---|---|
+| **Chave da live** | `/live`, `/broadcast`, `/status` (scripts e integrações) | Header `X-Live-Key: <LIVE_API_KEY>` |
+| **Sessão do painel** | as mesmas rotas, quando chamadas pelo painel web | Cookie `repet_painel` (criado em `POST /painel/login`) + header `X-Painel: 1` nas rotas que **mudam** algo |
+| **HTTP Basic** | `DELETE /api/replays/{id}` | `-u SEU_USUARIO:SUA_SENHA` (`ADMIN_USERNAME` / `ADMIN_PASSWORD`) |
+
+Exemplo de requisição com a chave:
+
+```http
+POST /live/loc1-quadra1 HTTP/1.1
+Host: SERVIDOR:8000
+X-Live-Key: SUA_LIVE_API_KEY
+```
+
+Se a requisição trouxer `X-Live-Key`, só ela é avaliada (chave errada dá `401`,
+mesmo que haja cookie). Sem a chave, vale o cookie do painel.
+
+Respostas de falha de autenticação:
+
+| Situação | Código | Corpo |
+|---|---|---|
+| `X-Live-Key` errada | `401` | `{"detail": "Chave inválida."}` |
+| Sem chave e sem sessão | `401` | `{"detail": "Chave inválida ou sessão ausente."}` |
+| Sessão (cookie) sem o header `X-Painel: 1` em rota que muda algo | `403` | `{"detail": "Falta o header X-Painel."}` |
+| `LIVE_API_KEY` não configurada no servidor | `503` | `{"detail": "LIVE_API_KEY não configurada."}` |
+| HTTP Basic errado ou não configurado | `401` (com `WWW-Authenticate: Basic`) | `{"detail": "Credencial inválida."}` |
+
+## Formato dos erros
+
+Os erros que a API devolve de propósito têm sempre este formato:
+
+```json
+{ "detail": "mensagem em português" }
+```
+
+A **única exceção** é a validação automática do FastAPI (corpo malformado,
+número inválido em `?delta=`, campo obrigatório ausente...), que responde `422`
+com uma lista:
+
+```json
+{
+  "detail": [
+    {
+      "type": "missing",
+      "loc": ["body", "nivel"],
+      "msg": "Field required",
+      "input": {}
+    }
+  ]
+}
+```
+
+Lembre de tratar os dois formatos: `detail` é `string` na maioria dos casos e
+`array` nesse caso.
+
+Nas mensagens de `404` de quadra, o servidor escreve o **caminho completo** do
+`cameras.json` (por exemplo `/home/.../config/cameras.json`); os exemplos abaixo
+abreviam para `config/cameras.json`.
 
 ---
 
@@ -50,11 +136,19 @@ da câmera, até o instante da chamada. O clipe é gerado com `-c copy`, então
 pode sair um pouco mais longo que o configurado, nunca mais curto. O envio ao
 Lara é feito depois, em segundo plano, pelo worker.
 
+| Parte | Valor |
+|---|---|
+| Path | `quadra_id`: id da quadra em `config/cameras.json` |
+| Headers | nenhum obrigatório |
+| Corpo | nenhum |
+
+**Requisição**
+
 ```bash
-curl -X POST http://SERVIDOR:8000/replay/loc1-quadra1
+curl -X POST http://SERVIDOR:8000/replay/loc1-quadra1 --max-time 15
 ```
 
-Resposta `200`:
+**Resposta `200`**
 
 ```json
 {
@@ -64,16 +158,25 @@ Resposta `200`:
 }
 ```
 
-O `replay_id` é o nome do arquivo sem `.mp4` (`loc1-quadra1_20261027100537`).
-O clipe termina no instante do clique: a API espera o segmento daquele
-instante fechar (até ~2 s) antes de cortar. Quem chama deve usar timeout
-generoso (o corte leva alguns segundos; 15 s no ESPHome).
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `quadra_id` | string | A quadra acionada |
+| `clip_filename` | string | Nome do arquivo gerado (`{quadra_id}_{AAAAMMDDHHMMSS}.mp4`) |
+| `clip_url` | string | Caminho do clipe bruto (`GET /clips/...`); relativo ao servidor |
 
-| Código | Quando |
-|---|---|
-| `404` | `quadra_id` não está em `config/cameras.json` |
-| `429` | A mesma quadra foi acionada há menos de `TRIGGER_COOLDOWN_SECONDS` (15 s); a mensagem diz quanto esperar |
-| `500` | Não foi possível cortar (buffer vazio ou parado, ver `MAX_STALENESS_SECONDS`) |
+O `replay_id` é o nome do arquivo sem `.mp4` (`loc1-quadra1_20261027100537`);
+use-o em `GET /api/replays/{replay_id}`. O clipe termina no instante do clique:
+a API espera o segmento daquele instante fechar (até ~2 s) antes de cortar.
+Quem chama deve usar timeout generoso (o corte leva alguns segundos; 15 s no
+ESPHome).
+
+**Erros**
+
+| Código | Quando | Exemplo de corpo |
+|---|---|---|
+| `404` | `quadra_id` não está em `config/cameras.json` | `{"detail": "quadra_id 'loc9-x' não está em config/cameras.json. Confira config/cameras.json."}` |
+| `429` | A mesma quadra foi acionada há menos de `TRIGGER_COOLDOWN_SECONDS` (15 s) | `{"detail": "Aguarde mais 9.4s antes de acionar 'loc1-quadra1' de novo (intervalo mínimo: 15s)."}` |
+| `500` | Não foi possível cortar (buffer vazio ou parado, ver `MAX_STALENESS_SECONDS`) | `{"detail": "<motivo do corte>"}` |
 
 ---
 
@@ -90,31 +193,47 @@ Todas as rotas de live exigem o header `X-Live-Key` com o valor de
 é como o painel as usa sem expor a chave. Os dois modos, quando usar cada um e os
 casos de borda estão em [`docs/LIVE.md`](LIVE.md).
 
+Nenhuma das três rotas tem corpo.
+
 ### Ligar
 
 `POST /live/{quadra_id}`
+
+**Requisição**
 
 ```bash
 curl -X POST http://SERVIDOR:8000/live/loc1-quadra1 \
   -H "X-Live-Key: SUA_LIVE_API_KEY"
 ```
 
-Resposta `200`:
+**Resposta `200`**
 
 ```json
-{ "quadra_id": "loc1-quadra1", "status": "iniciada", "max_seconds": 14400.0 }
+{ "quadra_id": "loc1-quadra1", "status": "iniciada", "max_seconds": 7200.0 }
 ```
 
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `quadra_id` | string | A quadra |
+| `status` | string | `iniciada` ou `ja_no_ar` |
+| `max_seconds` | número ou `null` | Prazo (`LIVE_MAX_SECONDS`, padrão 7200); `null` = sem limite |
+
 É idempotente: se a câmera já está no ar com a mesma stream key, devolve
-`"status": "ja_no_ar"` sem refazer nada. `max_seconds` é o prazo
-(`LIVE_MAX_SECONDS`); passado esse tempo a API desliga a câmera sozinha
-(`null` = sem limite). A imagem demora alguns segundos para aparecer no YouTube
-Studio.
+`"status": "ja_no_ar"` sem refazer nada:
+
+```json
+{ "quadra_id": "loc1-quadra1", "status": "ja_no_ar", "max_seconds": 7200.0 }
+```
+
+Passado o prazo, a API desliga a câmera sozinha. A imagem demora alguns
+segundos para aparecer no YouTube Studio.
 
 ### Desligar
 
 `POST /live/{quadra_id}/stop` ou `DELETE /live/{quadra_id}` (o `POST` existe
 para quem só consegue fazer POST).
+
+**Requisição**
 
 ```bash
 curl -X POST http://SERVIDOR:8000/live/loc1-quadra1/stop \
@@ -125,30 +244,47 @@ curl -X DELETE http://SERVIDOR:8000/live/loc1-quadra1 \
   -H "X-Live-Key: SUA_LIVE_API_KEY"
 ```
 
-Resposta `200`: `{"quadra_id": "loc1-quadra1", "status": "encerrada"}`, ou
-`"nao_estava_no_ar"` se já estava desligada. Ao desligar, a stream key também
-é apagada da câmera.
+**Resposta `200`**
+
+```json
+{ "quadra_id": "loc1-quadra1", "status": "encerrada" }
+```
+
+`status` é `encerrada`, ou `nao_estava_no_ar` se já estava desligada. Ao
+desligar, a stream key também é apagada da câmera.
 
 ### Ver se está no ar
 
 `GET /live/{quadra_id}`
 
+**Requisição**
+
 ```bash
 curl http://SERVIDOR:8000/live/loc1-quadra1 -H "X-Live-Key: SUA_LIVE_API_KEY"
-# {"quadra_id":"loc1-quadra1","no_ar":true}
 ```
 
-O estado é lido da própria câmera. Atenção: ela diz apenas que o envio está
-*habilitado*. Se a conexão com o YouTube falhar, o `no_ar` continua `true`; a
-confirmação de que a imagem chegou só existe no YouTube Studio.
+**Resposta `200`**
 
-| Código | Quando |
-|---|---|
-| `401` | Header `X-Live-Key` ausente ou errado |
-| `404` | `quadra_id` não está em `config/cameras.json` |
-| `422` | A quadra não tem `youtube_stream_key` no `cameras.json` (só no `POST`) |
-| `502` | Câmera não respondeu/recusou, ou o DNS do YouTube não resolveu |
-| `503` | `LIVE_API_KEY` não está configurada no servidor |
+```json
+{ "quadra_id": "loc1-quadra1", "no_ar": true }
+```
+
+O estado é lido da própria câmera (pode levar alguns segundos se ela estiver
+lenta). Atenção: ela diz apenas que o envio está *habilitado*. Se a conexão com o
+YouTube falhar, o `no_ar` continua `true`; a confirmação de que a imagem chegou
+só existe no YouTube Studio. Para um estado que não espera a câmera, use
+[`GET /status`](#estado-geral-get-status).
+
+### Erros de `/live`
+
+| Código | Quando | Exemplo de corpo |
+|---|---|---|
+| `401` | Header `X-Live-Key` ausente ou errado | `{"detail": "Chave inválida."}` |
+| `404` | `quadra_id` não está em `config/cameras.json` | `{"detail": "quadra_id 'loc9-x' não está em config/cameras.json."}` |
+| `409` | (`POST`) A quadra está em transmissão com placar, ou outra quadra de **mesma stream key** já está no ar | `{"detail": "'loc1-quadra1' está em transmissão com placar; encerre-a antes (POST /broadcast/loc1-quadra1/stop)."}` |
+| `422` | (`POST`) A quadra não tem `youtube_stream_key` no `cameras.json` | `{"detail": "'loc1-quadra2' não tem youtube_stream_key em config/cameras.json."}` |
+| `502` | Câmera não respondeu/recusou, ou o DNS do YouTube não resolveu | `{"detail": "<motivo devolvido pela câmera>"}` |
+| `503` | `LIVE_API_KEY` não está configurada no servidor | `{"detail": "LIVE_API_KEY não configurada."}` |
 
 Observações:
 
@@ -178,12 +314,13 @@ Use a live direta (`/live`) quando não precisar de placar; ela não gasta CPU.
 - **Sobrevive a reinício da API** (o ffmpeg roda destacado e é readotado), e se o
   ffmpeg cair, a API o relança sozinha (campo `reinicios`).
 
-Lados são sempre `a` e `b`. O placar é simples: pontos e sets, números inteiros.
+Lados são sempre `a` e `b` (aceita maiúscula). O placar é simples: pontos e
+sets, números inteiros que **nunca ficam negativos** (valores abaixo de 0 viram 0).
 
 ### Todas as rotas `/broadcast`
 
 Todas exigem `X-Live-Key` (ou sessão do painel) e `quadra_id` existente em `cameras.json`.
-Todas devolvem o objeto de estado descrito mais abaixo (o `start`/`stop` somam `status`).
+Todas devolvem o [objeto de estado](#objeto-de-estado) (o `start`/`stop` somam `status`).
 
 | Método e rota | Corpo / parâmetros | O que faz |
 |---|---|---|
@@ -199,74 +336,391 @@ Todas devolvem o objeto de estado descrito mais abaixo (o `start`/`stop` somam `
 | `POST /broadcast/{quadra_id}/volume/{up\|down}` | `?passo=10` (%) | Sobe/desce o volume |
 | `PUT /broadcast/{quadra_id}/volume` | `{"nivel": 150}` (%) | Define o volume |
 
-### Ligar e desligar
+As rotas de placar, nomes e volume funcionam **com a transmissão fora do ar**
+também: o valor fica gravado e vale quando ela for ligada com `reset: false`.
 
-```bash
-# jogo novo (placar 0x0, volume 100%); o corpo é opcional
-curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
-  -H "X-Live-Key: SUA_LIVE_API_KEY" -H "Content-Type: application/json" \
-  -d '{"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"}'
+### Objeto de estado
 
-curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/stop -H "X-Live-Key: SUA_LIVE_API_KEY"
-```
-
-Corpo do `start` (todos opcionais): `nome_a`, `nome_b` (até 14 caracteres,
-maiúsculas), `reset` (padrão `true`: placar 0x0 **e volume 100%**; com `false`
-mantém placar e volume, útil para religar o mesmo jogo) e `volume` (% do da câmera).
-É idempotente: já no ar devolve `"status": "ja_no_ar"`.
-
-### Placar
-
-```bash
-curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a -H "X-Live-Key: ..."
-curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/b -H "X-Live-Key: ..."
-curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a?delta=-1" -H "X-Live-Key: ..."  # corrige
-curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a -H "X-Live-Key: ..."   # +1 set e zera os pontos dos DOIS lados
-curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a?delta=-1" -H "X-Live-Key: ..."  # só tira 1 set
-curl -X PUT  http://SERVIDOR:8000/broadcast/loc1-quadra1/placar -H "X-Live-Key: ..." \
-  -H "Content-Type: application/json" -d '{"pontos_a": 40, "pontos_b": 15, "sets_a": 1}'  # correção manual
-curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/placar/zerar -H "X-Live-Key: ..."
-curl -X PUT  http://SERVIDOR:8000/broadcast/loc1-quadra1/nomes -H "X-Live-Key: ..." \
-  -H "Content-Type: application/json" -d '{"nome_a": "Ana e Bia"}'
-```
-
-O placar aparece no vídeo em menos de 1 s depois da chamada, e pode ser
-ajustado antes de ligar. Pontos e sets nunca ficam negativos.
-
-### Volume
-
-```bash
-curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/up   -H "X-Live-Key: ..."   # +10 pontos percentuais
-curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/down?passo=20" -H "X-Live-Key: ..."
-curl -X PUT  http://SERVIDOR:8000/broadcast/loc1-quadra1/volume -H "X-Live-Key: ..." \
-  -H "Content-Type: application/json" -d '{"nivel": 150}'
-```
-
-`nivel` é % do volume da câmera (100 = original, 0 = mudo, máximo
-`BROADCAST_VOLUME_MAX`=400). Vale na hora, sem derrubar a live. Há um limitador
-de pico, então subir demais satura com menos distorção, mas não perfeito: o
-microfone da câmera já chega perto de 0 dBFS em jogo.
-
-### Resposta (todas as rotas devolvem o estado)
+É o que quase toda rota de `/broadcast` devolve:
 
 ```json
 {
-  "quadra_id": "loc1-quadra1", "no_ar": true,
-  "nomes": {"a": "ANA E BIA", "b": "CRIS E DUDA"},
-  "placar": {"a": {"pontos": 2, "sets": 1}, "b": {"pontos": 1, "sets": 0}},
-  "volume": 100, "no_ar_ha_segundos": 312, "encerra_em_segundos": 6888, "reinicios": 0,
-  "travamentos": 0, "transmitindo": true, "audio_da_camera": true
+  "quadra_id": "loc1-quadra1",
+  "no_ar": true,
+  "nomes": { "a": "ANA E BIA", "b": "CRIS E DUDA" },
+  "placar": {
+    "a": { "pontos": 2, "sets": 1 },
+    "b": { "pontos": 1, "sets": 0 }
+  },
+  "volume": 100,
+  "no_ar_ha_segundos": 312,
+  "encerra_em_segundos": 6888,
+  "reinicios": 0,
+  "travamentos": 0,
+  "transmitindo": true,
+  "audio_da_camera": true
 }
 ```
 
-| Código | Quando |
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `quadra_id` | string | A quadra |
+| `no_ar` | bool | A transmissão foi pedida e está ativa |
+| `nomes.a`, `nomes.b` | string | Nomes das duplas como aparecem no vídeo (padrão `DUPLA A` / `DUPLA B`) |
+| `placar.{a,b}.pontos` | int | Pontos no set atual |
+| `placar.{a,b}.sets` | int | Sets ganhos |
+| `volume` | int | % do volume da câmera (100 = original, 0 = mudo) |
+| `no_ar_ha_segundos` | int ou `null` | Há quanto tempo está no ar; `null` fora do ar |
+| `encerra_em_segundos` | int ou `null` | Quanto falta para o prazo `LIVE_MAX_SECONDS`; `null` fora do ar ou sem limite |
+| `reinicios` | int | Quantas vezes a API relançou o ffmpeg desta transmissão |
+| `travamentos` | int | Quantas vezes o ffmpeg ficou vivo mas parado (sem quadros por 30 s) e foi relançado |
+| `transmitindo` | bool | `true` só se o ffmpeg está vivo **e produzindo quadros agora** |
+| `audio_da_camera` | bool ou `null` | `false` = câmera sem áudio, a live vai com silêncio; `null` = não sondado |
+
+Fora do ar, o mesmo objeto vem com `no_ar: false`, `no_ar_ha_segundos: null`,
+`encerra_em_segundos: null` e `transmitindo: false`; nomes, placar e volume
+continuam com o último valor.
+
+### Ligar e desligar
+
+#### Ligar
+
+`POST /broadcast/{quadra_id}/start`
+
+**Corpo (JSON, opcional; todos os campos opcionais)**
+
+| Campo | Tipo | Padrão | Descrição |
+|---|---|---|---|
+| `nome_a` | string | `DUPLA A` | Nome do lado A (até 14 caracteres; vira maiúscula) |
+| `nome_b` | string | `DUPLA B` | Nome do lado B |
+| `reset` | bool | `true` | `true` = jogo novo: placar 0x0 **e volume 100%**. `false` = mantém placar e volume (para religar o mesmo jogo) |
+| `volume` | int | 100 (ou o último, se `reset: false`) | % do volume da câmera, entre 0 e `BROADCAST_VOLUME_MAX` (400) |
+
+Nome: só ficam letras, números, espaço e `. & ' -`; o resto é descartado.
+
+**Exemplo 1: jogo novo, com nomes**
+
+```bash
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
+  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"}'
+```
+
+**Exemplo 2: sem corpo** (placar 0x0, nomes `DUPLA A`/`DUPLA B`, volume 100%)
+
+```bash
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+**Exemplo 3: religar o mesmo jogo** (a API caiu, ou você encerrou sem querer)
+
+```bash
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/start \
+  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"reset": false}'
+```
+
+**Resposta `200`** (exemplo 1; o `status` vem na frente do objeto de estado)
+
+```json
+{
+  "status": "iniciada",
+  "quadra_id": "loc1-quadra1",
+  "no_ar": true,
+  "nomes": { "a": "ANA E BIA", "b": "CRIS E DUDA" },
+  "placar": {
+    "a": { "pontos": 0, "sets": 0 },
+    "b": { "pontos": 0, "sets": 0 }
+  },
+  "volume": 100,
+  "no_ar_ha_segundos": 0,
+  "encerra_em_segundos": 7200,
+  "reinicios": 0,
+  "travamentos": 0,
+  "transmitindo": false,
+  "audio_da_camera": true
+}
+```
+
+`transmitindo` pode vir `false` nos primeiros segundos, até o ffmpeg produzir o
+primeiro quadro; consulte `GET /broadcast/{quadra_id}` para confirmar.
+
+É idempotente: com a transmissão já no ar, devolve `"status": "ja_no_ar"` com o
+estado atual, **sem** mexer em placar, nomes ou volume (o corpo é ignorado).
+
+#### Desligar
+
+`POST /broadcast/{quadra_id}/stop` ou `DELETE /broadcast/{quadra_id}`
+
+Sem corpo.
+
+```bash
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/stop \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+**Resposta `200`** (placar e nomes ficam guardados)
+
+```json
+{
+  "status": "encerrada",
+  "quadra_id": "loc1-quadra1",
+  "no_ar": false,
+  "nomes": { "a": "ANA E BIA", "b": "CRIS E DUDA" },
+  "placar": {
+    "a": { "pontos": 11, "sets": 2 },
+    "b": { "pontos": 7, "sets": 1 }
+  },
+  "volume": 100,
+  "no_ar_ha_segundos": null,
+  "encerra_em_segundos": null,
+  "reinicios": 0,
+  "travamentos": 0,
+  "transmitindo": false,
+  "audio_da_camera": null
+}
+```
+
+`status` é `encerrada` ou `nao_estava_no_ar`.
+
+### Estado
+
+```bash
+# uma quadra
+curl http://SERVIDOR:8000/broadcast/loc1-quadra1 -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+Resposta: o [objeto de estado](#objeto-de-estado).
+
+```bash
+# todas as quadras registradas, e quais estão no ar
+curl http://SERVIDOR:8000/broadcast -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+```json
+{
+  "no_ar": ["loc1-quadra1"],
+  "limite": 2,
+  "transmissoes": {
+    "loc1-quadra1": { "quadra_id": "loc1-quadra1", "no_ar": true, "...": "objeto de estado" },
+    "loc1-quadra2": { "quadra_id": "loc1-quadra2", "no_ar": false, "...": "objeto de estado" }
+  }
+}
+```
+
+`no_ar` lista os `quadra_id` ativos; `limite` é `BROADCAST_MAX_CONCURRENT`.
+`transmissoes` traz as quadras que a API já registrou (não só as no ar); para saber
+quem está transmitindo, use o campo `no_ar`.
+
+### Placar
+
+#### Ponto
+
+`POST /broadcast/{quadra_id}/ponto/{lado}?delta=1`
+
+| Parte | Valor |
 |---|---|
-| `401` / `503` | Chave ausente/errada / `LIVE_API_KEY` não configurada |
-| `404` | `quadra_id` não está em `config/cameras.json` |
-| `409` | Limite de 2 transmissões; a quadra está em live direta (e vice-versa); ou outra quadra com a **mesma stream key** já está no ar (`/live` também) |
-| `422` | Lado diferente de `a`/`b`, ou a quadra sem `youtube_stream_key` |
-| `502` | A câmera não respondeu ao checar a live direta |
-| `503` | O ffmpeg não estava lendo comandos (reiniciando); tente de novo |
+| Path `lado` | `a` ou `b` |
+| Query `delta` | inteiro, padrão `1`; `-1` corrige um ponto dado por engano |
+| Corpo | nenhum |
+
+```bash
+# +1 ponto para a dupla A
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+
+# desfaz um ponto da dupla A
+curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a?delta=-1" \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+**Resposta `200`**: o [objeto de estado](#objeto-de-estado) já com o placar novo
+(aqui, depois de um `ponto/a` com o jogo em 1x1):
+
+```json
+{
+  "quadra_id": "loc1-quadra1",
+  "no_ar": true,
+  "nomes": { "a": "ANA E BIA", "b": "CRIS E DUDA" },
+  "placar": {
+    "a": { "pontos": 2, "sets": 0 },
+    "b": { "pontos": 1, "sets": 0 }
+  },
+  "volume": 100,
+  "no_ar_ha_segundos": 120,
+  "encerra_em_segundos": 7080,
+  "reinicios": 0,
+  "travamentos": 0,
+  "transmitindo": true,
+  "audio_da_camera": true
+}
+```
+
+#### Set
+
+`POST /broadcast/{quadra_id}/set/{lado}?delta=1`
+
+Soma 1 set ao lado **e zera os pontos dos dois lados**. Com `delta=-1`, só tira
+1 set (não mexe nos pontos).
+
+```bash
+# a dupla A ganhou o set: +1 set e pontos 0x0
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+
+# fechou o set pro lado errado: tira 1 set (pontos ficam como estão)
+curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/set/a?delta=-1" \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+**Resposta `200`**: o objeto de estado. Antes, `a: 6 pontos / 0 sets`,
+`b: 4 pontos / 0 sets`; depois do `set/a`:
+
+```json
+{
+  "...": "...",
+  "placar": {
+    "a": { "pontos": 0, "sets": 1 },
+    "b": { "pontos": 0, "sets": 0 }
+  }
+}
+```
+
+#### Correção manual
+
+`PUT /broadcast/{quadra_id}/placar`
+
+Grava **exatamente** os valores enviados. Campos omitidos (ou `null`) não mudam.
+Valores negativos viram 0.
+
+**Corpo (JSON)**
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `pontos_a` | int | Pontos do lado A |
+| `pontos_b` | int | Pontos do lado B |
+| `sets_a` | int | Sets do lado A |
+| `sets_b` | int | Sets do lado B |
+
+```bash
+# o placar real é 40x15, com a dupla A com 1 set
+curl -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/placar \
+  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"pontos_a": 40, "pontos_b": 15, "sets_a": 1}'
+```
+
+**Resposta `200`**: o objeto de estado, com `placar.a = {pontos: 40, sets: 1}` e
+`placar.b = {pontos: 15, sets: <o que já estava>}`.
+
+Um corpo vazio `{}` é aceito e não muda nada.
+
+#### Zerar
+
+`POST /broadcast/{quadra_id}/placar/zerar`: zera pontos e sets dos dois lados
+(nomes e volume ficam). Sem corpo.
+
+```bash
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/placar/zerar \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+**Resposta `200`**: o objeto de estado com `placar` todo em `0`.
+
+#### Nomes
+
+`PUT /broadcast/{quadra_id}/nomes`
+
+**Corpo (JSON)**: `nome_a` e/ou `nome_b`; o que não vier não muda.
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `nome_a` | string | Nome do lado A (até 14 caracteres; vira maiúscula) |
+| `nome_b` | string | Nome do lado B |
+
+Uma string vazia (ou só com caracteres descartados) volta ao nome padrão
+(`DUPLA A` / `DUPLA B`).
+
+```bash
+curl -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/nomes \
+  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"nome_a": "Ana e Bia"}'
+```
+
+**Resposta `200`**: o objeto de estado com `nomes.a = "ANA E BIA"`.
+
+O placar aparece no vídeo em menos de 1 s depois da chamada, e pode ser
+ajustado antes de ligar.
+
+### Volume
+
+`nivel` é % do volume da câmera (100 = original, 0 = mudo, máximo
+`BROADCAST_VOLUME_MAX`=400); acima/abaixo dos limites o valor é ajustado, sem
+erro. Vale na hora, sem derrubar a live.
+
+#### Subir/descer
+
+`POST /broadcast/{quadra_id}/volume/{direcao}?passo=10`
+
+| Parte | Valor |
+|---|---|
+| Path `direcao` | `up` ou `down` (outro valor: `422`) |
+| Query `passo` | inteiro, em pontos percentuais; padrão `BROADCAST_VOLUME_STEP` (10) |
+| Corpo | nenhum |
+
+```bash
+# +10 pontos percentuais (de 100 para 110)
+curl -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/up \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+
+# -20 pontos percentuais
+curl -X POST "http://SERVIDOR:8000/broadcast/loc1-quadra1/volume/down?passo=20" \
+  -H "X-Live-Key: SUA_LIVE_API_KEY"
+```
+
+**Resposta `200`**: o objeto de estado com o `volume` novo (aqui `110`).
+
+#### Definir
+
+`PUT /broadcast/{quadra_id}/volume`
+
+**Corpo (JSON)**
+
+| Campo | Tipo | Obrigatório | Descrição |
+|---|---|---|---|
+| `nivel` | int | sim | Volume em % do da câmera |
+
+```bash
+curl -X PUT http://SERVIDOR:8000/broadcast/loc1-quadra1/volume \
+  -H "X-Live-Key: SUA_LIVE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"nivel": 150}'
+```
+
+**Resposta `200`**: o objeto de estado com `"volume": 150`.
+
+Há um limitador de pico, então subir demais satura com menos distorção, mas não
+perfeito: o microfone da câmera já chega perto de 0 dBFS em jogo.
+
+### Erros de `/broadcast`
+
+| Código | Quando | Exemplo de corpo |
+|---|---|---|
+| `401` / `403` / `503` | Chave ausente/errada; cookie sem `X-Painel`; `LIVE_API_KEY` não configurada | `{"detail": "Chave inválida."}` |
+| `404` | `quadra_id` não está em `config/cameras.json` | `{"detail": "quadra_id 'loc9-x' não está em config/cameras.json."}` |
+| `409` | Limite de 2 transmissões | `{"detail": "limite de 2 transmissões simultâneas atingido."}` |
+| `409` | A quadra está em live direta (`start`) | `{"detail": "'loc1-quadra1' está em live direta; encerre-a antes (POST /live/loc1-quadra1/stop)."}` |
+| `409` | Outra quadra com a **mesma stream key** já está no ar (vale para `/live` também) | `{"detail": "A stream key de 'loc1-quadra1' é a mesma de 'loc1-quadra2', que já está no ar; encerre 'loc1-quadra2' antes."}` |
+| `422` | `lado` diferente de `a`/`b` | `{"detail": "lado deve ser 'a' ou 'b'."}` |
+| `422` | `direcao` diferente de `up`/`down` | `{"detail": "direcao deve ser 'up' ou 'down'."}` |
+| `422` | A quadra sem `youtube_stream_key` (`start`) | `{"detail": "a quadra não tem youtube_stream_key em cameras.json."}` |
+| `422` | Corpo inválido (ex.: `PUT .../volume` sem `nivel`, ou `nivel` não numérico) | lista de validação, ver [Formato dos erros](#formato-dos-erros) |
+| `502` | A câmera não respondeu ao checar a live direta (`start`) | `{"detail": "<motivo devolvido pela câmera>"}` |
+| `503` | O ffmpeg não estava lendo comandos (reiniciando); tente de novo | `{"detail": "o ffmpeg não está lendo comandos agora (reiniciando?); tente de novo."}` |
 
 Log do ffmpeg de cada quadra: `logs/broadcast_{quadra_id}.log`.
 
@@ -289,33 +743,63 @@ a live muda; `start` com `reset=true` (padrão) volta o volume a 100%.
 
 Uma chamada devolve as quadras com os dois modos, sem consultar câmera nenhuma na
 hora: o estado da live direta vem de uma verificação periódica
-(`LIVE_MONITOR_INTERVAL_SECONDS`, padrão 15 s) que roda em segundo plano.
+(`LIVE_MONITOR_INTERVAL_SECONDS`, padrão 15 s) que roda em segundo plano. É a
+rota usada pelo painel.
+
+**Requisição**
 
 ```bash
 curl http://SERVIDOR:8000/status -H "X-Live-Key: SUA_LIVE_API_KEY"
 ```
 
+**Resposta `200`**
+
 ```json
 {
-  "quadras": [{
-    "quadra_id": "loc1-quadra1", "nome": "Quadra 2", "esporte": "padel",
-    "tem_stream_key": true,
-    "chave_compartilhada_com": [], "chave_em_uso_por": null,
-    "modo": "placar",
-    "direta": {"no_ar": false, "erro": null, "verificado_ha_segundos": 7},
-    "placar": { "...": "o mesmo objeto de GET /broadcast/{quadra_id}" }
-  }],
-  "transmissoes_com_placar": {"no_ar": 1, "limite": 2},
-  "verificacao_na_subida": {"direta": [], "placar": ["loc1-quadra1"], "conflitos": []}
+  "quadras": [
+    {
+      "quadra_id": "loc1-quadra1",
+      "nome": "Quadra 1",
+      "esporte": "padel",
+      "tem_stream_key": true,
+      "chave_compartilhada_com": ["loc1-quadra2"],
+      "chave_em_uso_por": null,
+      "modo": "placar",
+      "direta": { "no_ar": false, "erro": null, "verificado_ha_segundos": 7 },
+      "placar": { "quadra_id": "loc1-quadra1", "no_ar": true, "...": "o mesmo objeto de GET /broadcast/{quadra_id}" }
+    },
+    {
+      "quadra_id": "loc1-quadra2",
+      "nome": "Quadra 2",
+      "esporte": "padel",
+      "tem_stream_key": true,
+      "chave_compartilhada_com": ["loc1-quadra1"],
+      "chave_em_uso_por": "loc1-quadra1",
+      "modo": "nenhum",
+      "direta": { "no_ar": false, "erro": null, "verificado_ha_segundos": 7 },
+      "placar": { "quadra_id": "loc1-quadra2", "no_ar": false, "...": "objeto de estado" }
+    }
+  ],
+  "transmissoes_com_placar": { "no_ar": 1, "limite": 2 },
+  "verificacao_na_subida": {
+    "direta": [],
+    "placar": ["loc1-quadra1"],
+    "conflitos": []
+  }
 }
 ```
 
-`modo`: `placar`, `direta`, `conflito` (os dois ligados: veja abaixo), `nenhum` ou
-`desconhecido` (a câmera não respondeu e não há transmissão com placar).
-
-`chave_compartilhada_com` lista as outras quadras com a **mesma** `youtube_stream_key`
-(duplicar a key é permitido: um canal só) e `chave_em_uso_por` diz qual delas está no ar
-agora. Enquanto uma estiver no ar, em **qualquer** modo, ligar outra responde `409`.
+| Campo (por quadra) | Descrição |
+|---|---|
+| `nome`, `esporte` | Vêm do `cameras.json` |
+| `tem_stream_key` | A quadra tem `youtube_stream_key` (sem ela, `start` dá `422`) |
+| `chave_compartilhada_com` | Outras quadras com a **mesma** `youtube_stream_key` (duplicar é permitido: um canal só) |
+| `chave_em_uso_por` | Qual quadra de mesma key está no ar agora (`null` = nenhuma); enquanto uma estiver no ar, em **qualquer** modo, ligar outra responde `409` |
+| `modo` | `placar`, `direta`, `conflito` (os dois ligados), `nenhum` ou `desconhecido` (a câmera não respondeu e não há transmissão com placar) |
+| `direta.no_ar` | `true`/`false`, ou `null` se a câmera não respondeu (veja `direta.erro`) |
+| `direta.erro` | Mensagem do último erro de consulta à câmera; `null` se deu certo. Antes da 1ª verificação: `"ainda não verificado"` |
+| `direta.verificado_ha_segundos` | Idade da última verificação |
+| `placar` | O [objeto de estado](#objeto-de-estado) da transmissão com placar |
 
 ### Verificação na subida
 
@@ -360,16 +844,66 @@ login responde `503`. A sessão é um cookie `repet_painel` assinado (HMAC), `Ht
 `SameSite=Strict`, válido por `PANEL_SESSION_HOURS` (12 h). Reiniciar a API não desloga
 ninguém; trocar a senha (ou `PANEL_SECRET`) desloga todos.
 
-| Rota | Para quê |
-|---|---|
-| `POST /painel/login` `{"usuario","senha"}` | Cria a sessão. `401` credencial errada, `429` depois de 5 erros por IP em 1 min, `503` sem credencial no servidor |
-| `POST /painel/logout` | Apaga o cookie |
-| `GET /painel/me` | `{"usuario"}` ou `401` |
+Essas três rotas não aparecem no Swagger (`/docs`).
 
-**Segurança.** Com cookie, as rotas que mudam algo exigem também o header
-`X-Painel: 1` (defesa contra CSRF; o painel o envia sozinho), senão `403`. Quem usa o
-header `X-Live-Key` (scripts) não precisa dele. O tráfego é HTTP puro: na rede interna a
-senha segue em claro; para acesso de fora, ponha um proxy HTTPS na frente.
+### Login
+
+`POST /painel/login`
+
+**Corpo (JSON)**
+
+| Campo | Tipo | Obrigatório | Descrição |
+|---|---|---|---|
+| `usuario` | string | sim | `ADMIN_USERNAME` |
+| `senha` | string | sim | `ADMIN_PASSWORD` |
+
+```bash
+curl -i -c cookies.txt -X POST http://SERVIDOR:8000/painel/login \
+  -H "Content-Type: application/json" \
+  -d '{"usuario": "SEU_USUARIO", "senha": "SUA_SENHA"}'
+```
+
+**Resposta `200`**: o cookie vem no header `Set-Cookie`, o corpo só confirma o usuário.
+
+```http
+HTTP/1.1 200 OK
+set-cookie: repet_painel=<token assinado>; HttpOnly; Max-Age=43200; Path=/; SameSite=strict
+content-type: application/json
+
+{"usuario": "SEU_USUARIO"}
+```
+
+| Código | Quando | Corpo |
+|---|---|---|
+| `401` | Usuário ou senha errados | `{"detail": "Usuário ou senha inválidos."}` |
+| `429` | 5 erros do mesmo IP em 1 min | `{"detail": "Muitas tentativas; aguarde um minuto."}` |
+| `503` | `ADMIN_*` não configurados no servidor | `{"detail": "Defina ADMIN_USERNAME e ADMIN_PASSWORD no servidor."}` |
+
+### Sessão (`me`) e saída
+
+```bash
+curl -b cookies.txt http://SERVIDOR:8000/painel/me
+# {"usuario": "SEU_USUARIO"}      (401 {"detail": "Sem sessão."} se não houver cookie válido)
+
+curl -b cookies.txt -c cookies.txt -X POST http://SERVIDOR:8000/painel/logout
+# {"status": "saiu"}
+```
+
+### Usando a sessão nas outras rotas
+
+Com cookie, as rotas que mudam algo exigem também o header `X-Painel: 1` (defesa
+contra CSRF; o painel o envia sozinho), senão `403`. Os `GET` não precisam dele. Quem
+usa o header `X-Live-Key` (scripts) não precisa dele.
+
+```bash
+curl -b cookies.txt -X POST http://SERVIDOR:8000/broadcast/loc1-quadra1/ponto/a \
+  -H "X-Painel: 1"
+
+curl -b cookies.txt http://SERVIDOR:8000/status
+```
+
+**Segurança.** O tráfego é HTTP puro: na rede interna a senha segue em claro; para
+acesso de fora, ponha um proxy HTTPS na frente.
 
 ---
 
@@ -379,9 +913,13 @@ senha segue em claro; para acesso de fora, ponha um proxy HTTPS na frente.
 
 `GET /api/replays/{replay_id}`
 
+**Requisição**
+
 ```bash
 curl http://SERVIDOR:8000/api/replays/loc1-quadra1_20261027100537
 ```
+
+**Resposta `200`**
 
 ```json
 {
@@ -396,48 +934,120 @@ curl http://SERVIDOR:8000/api/replays/loc1-quadra1_20261027100537
 }
 ```
 
-`lara_status` é `pendente`, `enviado` ou `falha`. `404` se o replay não existe.
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `id` | string | O `replay_id` |
+| `quadra_id` | string | A quadra |
+| `criado_em` | string (ISO 8601) | Instante do clique, no horário do servidor (sem fuso) |
+| `duracao_segundos` | número | Duração do arquivo gerado |
+| `tamanho_bytes` | int | Tamanho do arquivo bruto |
+| `media_url` | string | Caminho do vídeo (`GET .../media`) |
+| `lara_status` | string | `pendente`, `enviado` ou `falha` |
+| `lara_enviado_em` | string ou `null` | Quando subiu ao Lara; `null` enquanto `pendente` ou `falha` |
+
+Um replay recém-gravado, ainda não enviado, vem com `"lara_status": "pendente"` e
+`"lara_enviado_em": null`.
+
+**Erro `404`**
+
+```json
+{ "detail": "replay 'loc1-quadra1_20990101000000' não encontrado." }
+```
 
 ### Vídeo
 
 `GET /api/replays/{replay_id}/media`
 
-Serve o vídeo processado (com música) se já existir; senão, o bruto. Aceita
-`Range` (`206`) e ETag, com `Cache-Control: no-cache`. `404` se o replay não
-existe ou se a retenção local já removeu o arquivo.
+Serve o vídeo processado (com música) se já existir; senão, o bruto. Responde
+`video/mp4`, aceita `Range` (`206`) e ETag, com `Cache-Control: no-cache`.
 
 ```bash
+# baixar o arquivo
 curl -o replay.mp4 http://SERVIDOR:8000/api/replays/loc1-quadra1_20261027100537/media
+
+# pedir só o começo (útil para player/preview)
+curl -H "Range: bytes=0-1023" -o trecho.bin \
+  http://SERVIDOR:8000/api/replays/loc1-quadra1_20261027100537/media
 ```
+
+Em HTML: `<video controls src="/api/replays/loc1-quadra1_20261027100537/media"></video>`.
+
+| Código | Quando | Corpo |
+|---|---|---|
+| `404` | O replay não existe | `{"detail": "replay '...' não encontrado."}` |
+| `404` | A retenção local já removeu o arquivo | `{"detail": "arquivo do replay '...' não está mais em disco (retenção local já removeu?)."}` |
 
 ### Listagem por quadra
 
 `GET /api/quadras/{quadra_id}/replays?page=1&page_size=20`
 
-Do mais recente ao mais antigo. `page_size` vai de 1 a 100 (padrão 20).
+Do mais recente ao mais antigo.
+
+| Query | Tipo | Padrão | Descrição |
+|---|---|---|---|
+| `page` | int | `1` | Página; valores menores que 1 viram 1 |
+| `page_size` | int | `20` | Itens por página; limitado entre 1 e 100 (fora disso, a API ajusta, sem erro) |
+
+**Requisição**
 
 ```bash
-curl "http://SERVIDOR:8000/api/quadras/loc1-quadra1/replays?page=1&page_size=10"
+curl "http://SERVIDOR:8000/api/quadras/loc1-quadra1/replays?page=1&page_size=2"
 ```
+
+**Resposta `200`**
 
 ```json
 {
   "quadra_id": "loc1-quadra1",
   "page": 1,
-  "page_size": 10,
+  "page_size": 2,
   "total": 42,
-  "items": [ { "id": "...", "media_url": "...", "lara_status": "enviado" } ]
+  "items": [
+    {
+      "id": "loc1-quadra1_20261027100537",
+      "quadra_id": "loc1-quadra1",
+      "criado_em": "2026-10-27T10:05:37",
+      "duracao_segundos": 35.4,
+      "tamanho_bytes": 21043210,
+      "media_url": "/api/replays/loc1-quadra1_20261027100537/media",
+      "lara_status": "enviado",
+      "lara_enviado_em": "2026-10-27T10:07:02"
+    },
+    {
+      "id": "loc1-quadra1_20261027094412",
+      "quadra_id": "loc1-quadra1",
+      "criado_em": "2026-10-27T09:44:12",
+      "duracao_segundos": 35.2,
+      "tamanho_bytes": 20877340,
+      "media_url": "/api/replays/loc1-quadra1_20261027094412/media",
+      "lara_status": "pendente",
+      "lara_enviado_em": null
+    }
+  ]
 }
 ```
 
-`404` se a quadra não existe.
+Cada item tem o mesmo formato de [Metadados](#metadados). `total` é a contagem de
+todos os replays da quadra (não só da página); para percorrer tudo, aumente `page`
+até `page * page_size >= total`. Uma página além do fim devolve `"items": []`.
+
+**Erro `404`**: `{"detail": "quadra 'loc9-x' não encontrada."}`. A quadra precisa
+estar no banco, e a API a copia do `cameras.json` **só ao subir**: depois de
+adicionar uma quadra nova ao arquivo, reinicie a API (aqui o `404` aparece mesmo
+com a quadra no `cameras.json`).
 
 ### Clipe bruto e página de teste
 
 - `GET /clips/{arquivo}.mp4`: o clipe bruto, direto do disco (é o
   `clip_url` devolvido pelo `POST /replay`).
+
+  ```bash
+  curl -o clipe.mp4 http://SERVIDOR:8000/clips/loc1-quadra1_20261027100537.mp4
+  ```
+
 - `GET /quadra/{quadra_id}`: página HTML simples com os replays da quadra,
-  para teste interno.
+  para teste interno (`404` com `{"detail": ...}` se a quadra não existe no
+  `cameras.json`).
 
 ---
 
@@ -447,19 +1057,96 @@ curl "http://SERVIDOR:8000/api/quadras/loc1-quadra1/replays?page=1&page_size=10"
 `ADMIN_PASSWORD`. Remove o registro e os arquivos (bruto e processado).
 Sem essas variáveis configuradas, responde `401` sempre.
 
+**Requisição**
+
 ```bash
-curl -X DELETE -u SEU_USUARIO:SUA_SENHA \
+curl -i -X DELETE -u SEU_USUARIO:SUA_SENHA \
   http://SERVIDOR:8000/api/replays/loc1-quadra1_20261027100537
 ```
 
-`204` sem corpo em caso de sucesso; `404` se não existe; `401` credencial
-inválida.
+O header enviado é `Authorization: Basic base64(usuario:senha)`.
+
+**Resposta**
+
+```http
+HTTP/1.1 204 No Content
+```
+
+| Código | Quando | Corpo |
+|---|---|---|
+| `204` | Apagado | nenhum |
+| `401` | Credencial inválida, ou `ADMIN_*` não configurados (header `WWW-Authenticate: Basic`) | `{"detail": "Credencial inválida."}`, ou `{"detail": "Autenticação de administrador não configurada (ADMIN_USERNAME/ADMIN_PASSWORD)."}` |
+| `404` | O replay não existe | `{"detail": "replay '...' não encontrado."}` |
+
+A operação não pode ser desfeita.
 
 ---
 
 ## Healthcheck
 
+`GET /health`, sem autenticação.
+
 ```bash
 curl http://SERVIDOR:8000/health
-# {"status":"ok"}
+```
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+## Exemplo de ponta a ponta: um jogo
+
+Fluxo típico de operação de uma quadra com placar, usando só `curl`:
+
+```bash
+API=http://SERVIDOR:8000
+KEY="X-Live-Key: SUA_LIVE_API_KEY"
+Q=loc1-quadra1
+JSON="Content-Type: application/json"
+
+# 1. antes de ligar: confira se a quadra está livre
+curl -s $API/status -H "$KEY"
+
+# 2. liga a transmissão com os nomes das duplas
+curl -s -X POST $API/broadcast/$Q/start -H "$KEY" -H "$JSON" \
+  -d '{"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"}'
+
+# 3. durante o jogo
+curl -s -X POST $API/broadcast/$Q/ponto/a -H "$KEY"
+curl -s -X POST $API/broadcast/$Q/ponto/b -H "$KEY"
+curl -s -X POST "$API/broadcast/$Q/ponto/b?delta=-1" -H "$KEY"   # errou: desfaz
+curl -s -X POST $API/broadcast/$Q/set/a -H "$KEY"                # A fechou o set
+curl -s -X PUT  $API/broadcast/$Q/volume -H "$KEY" -H "$JSON" -d '{"nivel": 130}'
+
+# 4. alguém apertou o botão de replay (o firmware faz esta chamada; sem autenticação)
+curl -s -X POST $API/replay/$Q --max-time 15
+
+# 5. fim de jogo
+curl -s -X POST $API/broadcast/$Q/stop -H "$KEY"
+```
+
+Em Python, o mesmo com `requests`:
+
+```python
+import requests
+
+API = "http://SERVIDOR:8000"
+HEADERS = {"X-Live-Key": "SUA_LIVE_API_KEY"}
+QUADRA = "loc1-quadra1"
+
+r = requests.post(
+    f"{API}/broadcast/{QUADRA}/start",
+    headers=HEADERS,
+    json={"nome_a": "Ana e Bia", "nome_b": "Cris e Duda"},
+    timeout=30,  # o start sonda a câmera (alguns segundos)
+)
+r.raise_for_status()  # em erro, r.json()["detail"] tem a mensagem
+
+r = requests.post(f"{API}/broadcast/{QUADRA}/ponto/a", headers=HEADERS, timeout=10)
+print(r.json()["placar"])  # {"a": {"pontos": 1, "sets": 0}, "b": {...}}
+
+r = requests.post(f"{API}/replay/{QUADRA}", timeout=15)
+print(r.json()["clip_url"])
 ```
